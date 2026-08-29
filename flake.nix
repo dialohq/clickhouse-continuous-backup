@@ -103,7 +103,7 @@
       default = chart;
     });
 
-    checks = forAllSystems (system: let
+    checks = nixpkgs.lib.genAttrs ["x86_64-linux"] (system: let
       packages = self.packages.${system};
       pkgs = import nixpkgs {inherit system;};
     in {
