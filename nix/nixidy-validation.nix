@@ -1,0 +1,32 @@
+{chartSource, ...}: {
+  nixidy.target = {
+    repository = "https://github.com/dialohq/durable-clickhouse-sink";
+    branch = "main";
+    rootPath = ".rendered";
+  };
+
+  applications.validation = {
+    namespace = "durable-clickhouse-sink";
+    helm.releases.sink = {
+      chart = chartSource;
+      values = {
+        kafka.bootstrapServers = "kafka.example:9092";
+        clickhouse = {
+          host = "clickhouse.example";
+          credentialsSecret.name = "clickhouse-credentials";
+        };
+        backup = {
+          enabled = true;
+          credentialsSecret.name = "clickhouse-backup-credentials";
+        };
+        pipelines = [{
+          name = "events";
+          rawTopic = "events.raw";
+          canonicalTopic = "events.canonical";
+          conflictTopic = "events.conflicts";
+          table = "events";
+        }];
+      };
+    };
+  };
+}
