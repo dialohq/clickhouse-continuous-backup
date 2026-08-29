@@ -1,0 +1,9 @@
+/.direnv/
+/.devenv/
+/.gradle/
+/result
+/result-*
+/build/
+*.iml
+.idea/
+
