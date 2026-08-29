@@ -6,6 +6,17 @@ The optional CronJob pauses every managed connector, waits until every task is
 paused, synchronously backs up all target databases, and then resumes the
 connectors. It refuses to start unless every connector and task was already
 running, so it cannot accidentally resume an operator-paused connector.
+Every archive name contains both a UTC timestamp and the backup pod UID, so a
+Job retry cannot overwrite a previous attempt. The Job accepts a backup only
+after `system.backups` confirms the exact returned backup ID, destination, and
+`BACKUP_CREATED` status.
+
+The backup process traps normal exit, `SIGINT`, and `SIGTERM`, terminates an
+in-flight ClickHouse request, and resumes every managed connector. No process
+can recover from `SIGKILL`, abrupt node loss, or loss of network access to
+Connect. Alert on failed backup Jobs and paused connectors. After such a
+failure, verify that no backup is still running in ClickHouse, then resume the
+chart-managed connectors through the Connect API before retrying the Job.
 
 Backups use ClickHouse's direct `S3(named_collection, path)` engine. They do not
 use an S3-backed `Disk`: disk metadata can be local to one ClickHouse server,

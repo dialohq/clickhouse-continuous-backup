@@ -27,6 +27,9 @@ in {
           user = "default:"
         '';
       };
+      secrets.clickhouse-bad-backup.stringData."clickhouse-curl.config" = ''
+        user = "missing:wrong"
+      '';
 
       services = {
         redpanda.spec = {

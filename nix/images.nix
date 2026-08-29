@@ -1,4 +1,4 @@
-{pkgs, system, deduplicator, nix2container}: let
+{pkgs, system, backup, deduplicator, nix2container}: let
   n2c = nix2container.packages.${system}.nix2container;
   connector = pkgs.runCommand "clickhouse-kafka-connect-1.5.0" {
     src = pkgs.fetchurl {
@@ -59,6 +59,7 @@ in {
             pkgs.curl
             pkgs.jq
             pkgs.dockerTools.caCertificates
+            backup
             connector
           ];
           pathsToLink = ["/bin" "/lib" "/plugins"];

@@ -76,6 +76,26 @@ pipelines:
     canonicalRetentionMs: 7776000000
 ```
 
+Optional scheduled backups use a ClickHouse S3 named collection configured on
+the ClickHouse servers. Ceph RGW and MinIO use the same interface.
+
+```yaml
+backup:
+  enabled: true
+  schedule: "17 2 * * *"
+  namedCollection: durable_clickhouse_backups
+  pathPrefix: durable-events/production
+  credentialsSecret:
+    name: durable-clickhouse-backup
+    httpConfigKey: clickhouse-curl.config
+```
+
+Each run is a Kubernetes Job with `concurrencyPolicy: Forbid`. It verifies all
+managed connector tasks are running, pauses them, creates and verifies a direct
+S3 backup, and resumes them on success, failure, or normal pod termination.
+See the recovery documentation for the independent Kafka backup requirement
+and the unavoidable hard-kill recovery procedure.
+
 The immutable `stateNamespace`, release name, pipeline name, topic names, and
 Kafka Connect internal topics are recovery identities. Do not rename them as a
 routine Helm change.

@@ -87,6 +87,7 @@ let
         namedCollection: durable_clickhouse_backups
         pathPrefix: durable-clickhouse-sink
         archiveExtension: tar.zst
+        pauseTimeoutSeconds: 120
         credentialsSecret:
           name: ""
           httpConfigKey: clickhouse-curl.config
@@ -178,6 +179,7 @@ let
             namedCollection = {type = "string"; pattern = "^[A-Za-z_][A-Za-z0-9_]*$";};
             pathPrefix = {type = "string"; pattern = "^[A-Za-z0-9_./-]+$";};
             archiveExtension = {type = "string"; enum = ["tar.zst" "tar.gz" "tar.xz" "tar.bz2" "tgz" "tzst"];};
+            pauseTimeoutSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             credentialsSecret = {
               type = "object";
               properties = {
@@ -777,62 +779,33 @@ let
               spec:
                 restartPolicy: Never
                 automountServiceAccountToken: false
+                terminationGracePeriodSeconds: 60
                 securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
                 containers:
                   - name: backup
                     image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
                     imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
-                    command: ["/bin/bash", "-euc"]
-                    args:
-                      - |
-                        connectors=(
-                          {{- range $pipeline := .Values.pipelines }}
-                          {{ include "durable-clickhouse-sink.pipelineName" (list $ $pipeline) | quote }}
-                          {{- end }}
-                        )
-                        resume() {
-                          for connector in "''${connectors[@]}"; do
-                            curl --fail --silent --show-error --request PUT "$CONNECT_URL/connectors/$connector/resume" || true
-                          done
-                        }
-                        for connector in "''${connectors[@]}"; do
-                          state=$(curl --fail --silent "$CONNECT_URL/connectors/$connector/status")
-                          if ! jq --exit-status '(.tasks | length > 0) and ([.connector.state, (.tasks[].state)] | all(. == "RUNNING"))' <<<"$state" >/dev/null; then
-                            echo "connector must be fully running before backup: $connector" >&2
-                            exit 1
-                          fi
-                        done
-                        trap resume EXIT
-                        for connector in "''${connectors[@]}"; do
-                          curl --fail-with-body --request PUT "$CONNECT_URL/connectors/$connector/pause"
-                        done
-                        for connector in "''${connectors[@]}"; do
-                          for attempt in $(seq 1 120); do
-                            if curl --fail --silent "$CONNECT_URL/connectors/$connector/status" | jq --exit-status '[.connector.state, (.tasks[].state)] | all(. == "PAUSED")' >/dev/null; then
-                              break
-                            fi
-                            if [[ "$attempt" == 120 ]]; then
-                              echo "connector did not pause: $connector" >&2
-                              exit 1
-                            fi
-                            sleep 1
-                          done
-                        done
-                        stamp=$(date -u +%Y%m%dT%H%M%SZ)
-                        destination="S3({{ .Values.backup.namedCollection }}, '{{ trimSuffix "/" .Values.backup.pathPrefix }}/$stamp.{{ .Values.backup.archiveExtension }}')"
-                        query="BACKUP {{ include "durable-clickhouse-sink.backupObjects" . }} TO $destination"
-                        result=$(curl --silent --show-error --config /etc/clickhouse/curl.config --fail-with-body --data-binary "$query" "$CLICKHOUSE_URL")
-                        backup_id="''${result%%$'\t'*}"
-                        if [[ ! $backup_id =~ ^[0-9a-fA-F-]{36}$ ]] || [[ $result != *$'\tBACKUP_CREATED' ]]; then
-                          echo "unexpected ClickHouse BACKUP result: $result" >&2
-                          exit 1
-                        fi
-                        curl --silent --show-error --config /etc/clickhouse/curl.config --fail-with-body --data-binary "SELECT name, status, num_files, uncompressed_size, compressed_size FROM system.backups WHERE id = '$backup_id' FORMAT JSONEachRow" "$CLICKHOUSE_URL"
+                    command: ["/bin/durable-clickhouse-backup"]
                     env:
                       - name: CONNECT_URL
                         value: http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083
                       - name: CLICKHOUSE_URL
                         value: {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }}
+                      - name: CONNECTOR_NAMES
+                        value: |-
+                          {{- range $pipeline := .Values.pipelines }}
+                          {{ include "durable-clickhouse-sink.pipelineName" (list $ $pipeline) }}
+                          {{- end }}
+                      - name: BACKUP_OBJECTS
+                        value: {{ include "durable-clickhouse-sink.backupObjects" . | trim | quote }}
+                      - {name: BACKUP_NAMED_COLLECTION, value: {{ .Values.backup.namedCollection | quote }}}
+                      - {name: BACKUP_PATH_PREFIX, value: {{ trimSuffix "/" .Values.backup.pathPrefix | quote }}}
+                      - {name: BACKUP_ARCHIVE_EXTENSION, value: {{ .Values.backup.archiveExtension | quote }}}
+                      - {name: PAUSE_TIMEOUT_SECONDS, value: {{ .Values.backup.pauseTimeoutSeconds | quote }}}
+                      - name: BACKUP_RUN_ID
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.uid
                     volumeMounts:
                       - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
                       - {name: tmp, mountPath: /tmp}

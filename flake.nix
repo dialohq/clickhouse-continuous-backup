@@ -25,7 +25,9 @@
     packages = forAllSystems (system: let
       pkgs = import nixpkgs {inherit system;};
       deduplicator = pkgs.callPackage ./nix/deduplicator.nix {};
-      images = import ./nix/images.nix {inherit pkgs system deduplicator nix2container;};
+      backup = pkgs.callPackage ./nix/backup.nix {};
+      backupTests = pkgs.callPackage ./nix/backup-tests.nix {inherit backup;};
+      images = import ./nix/images.nix {inherit pkgs system backup deduplicator nix2container;};
       chartSource = pkgs.callPackage ./nix/chart.nix {};
       chart = pkgs.runCommand "durable-clickhouse-sink-chart-0.1.0" {nativeBuildInputs = [pkgs.kubernetes-helm];} ''
         mkdir -p $out
@@ -95,7 +97,7 @@
         }];
       };
     in {
-      inherit deduplicator chart chartSource e2eValues;
+      inherit backup backupTests deduplicator chart chartSource e2eValues;
       deduplicatorImage = images.deduplicator;
       connectImage = images.connect;
       manifests = nixidyEnv.environmentPackage;
@@ -107,7 +109,7 @@
       packages = self.packages.${system};
       pkgs = import nixpkgs {inherit system;};
     in {
-      inherit (packages) deduplicator manifests e2eManifests;
+      inherit (packages) backupTests deduplicator manifests e2eManifests;
       chart = pkgs.runCommand "check-chart" {
         nativeBuildInputs = [pkgs.kubernetes-helm];
       } ''
@@ -134,6 +136,8 @@
         }
         expect_rejected --set-string 'pipelines[0].connectorConfig.exactlyOnce=false'
         expect_rejected --set-string 'pipelines[0].rawRetentionMs=2592000000'
+        expect_rejected --set backup.pauseTimeoutSeconds=0
+        expect_rejected --set-string "backup.pathPrefix=invalid')"
         expect_rejected --set-string 'pipelines[1].name=events' \
           --set-string 'pipelines[1].rawTopic=other.raw' \
           --set-string 'pipelines[1].canonicalTopic=other.canonical' \
@@ -144,7 +148,10 @@
           echo "backup unexpectedly uses server-local Disk metadata" >&2
           exit 1
         fi
-        grep -F 'S3(durable_clickhouse_backups,' rendered.yaml >/dev/null
+        grep -F '/bin/durable-clickhouse-backup' rendered.yaml >/dev/null
+        grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
+        grep -F 'BACKUP_NAMED_COLLECTION' rendered.yaml >/dev/null
+        grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
         touch $out
       '';
     });

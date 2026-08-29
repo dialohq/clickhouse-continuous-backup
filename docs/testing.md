@@ -8,7 +8,18 @@ nix flake check
 
 The flake builds the Kotlin application, runs its stateful topology tests,
 packages and strictly lints the Helm chart, checks negative safety validation,
-and renders the chart through Nixidy.
+renders the chart through Nixidy, and runs deterministic backup-job failure
+tests.
+
+The backup suite exercises:
+
+- connectors with no tasks, failed tasks, and a pre-existing paused state;
+- pause request failure and pause timeout;
+- ClickHouse request failure and malformed backup responses;
+- missing or mismatched `system.backups` confirmation;
+- connector resumption after every post-preflight failure and `SIGTERM`;
+- a successful multi-connector backup with a unique destination and an exact
+  backup-ID verification query.
 
 ## RKE2 end to end
 
@@ -34,11 +45,14 @@ restore ClickHouse/Keeper instances, and MinIO. It then verifies:
 3. three hard failures of both managed processing layers do not lose or double
    records;
 4. ClickHouse has equal total-row and unique-ID counts;
-5. a direct-S3 backup is visible to an independent ClickHouse server;
-6. the database and KeeperMap checkpoint restore successfully;
-7. preserving the Kafka Connect identity during cutover delivers later records
+5. an operator-paused connector makes the backup fail and remains paused;
+6. invalid ClickHouse backup credentials make the Job fail without leaving the
+   connector paused or creating a backup;
+7. a direct-S3 backup is visible to an independent ClickHouse server;
+8. the database and KeeperMap checkpoint restore successfully;
+9. preserving the Kafka Connect identity during cutover delivers later records
    exactly once to the restored target;
-8. the former target stops advancing after cutover.
+10. the former target stops advancing after cutover.
 
 MinIO is test-only. Production uses an externally managed S3-compatible store,
 such as Ceph RGW, through the same ClickHouse named-collection interface.

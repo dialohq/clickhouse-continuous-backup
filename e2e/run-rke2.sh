@@ -136,6 +136,24 @@ restore_clickhouse() {
   k -n "$namespace" exec clickhouse-restore-0 -- clickhouse-client --query "$1"
 }
 
+connector_request() {
+  local method=$1 path=$2
+  k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
+    curl --fail --silent --show-error --request "$method" \
+      "http://localhost:8083/connectors/sink-durable-clickhouse-sink-events$path"
+}
+
+wait_connector_state() {
+  local expected=$1 actual
+  for _ in {1..120}; do
+    actual=$(connector_request GET /status 2>/dev/null | jq -r '.connector.state' || true)
+    [[ $actual == "$expected" ]] && return
+    sleep 1
+  done
+  echo "expected connector state $expected, got $actual" >&2
+  return 1
+}
+
 wait_count() {
   local expected=$1 query=$2 actual
   for _ in {1..240}; do
@@ -187,9 +205,26 @@ wait_count 1100 'SELECT uniqExact(id) FROM durable_e2e.events'
 conflicts=$(k -n "$namespace" exec redpanda-0 -- rpk topic consume events.conflicts -n 1 --format '%k' -X brokers=redpanda:9092)
 [[ $conflicts == event-1 ]]
 
+connector_request PUT /pause
+wait_connector_state PAUSED
+k -n "$namespace" create job e2e-backup-refuses-paused --from=cronjob/sink-durable-clickhouse-sink-backup
+k -n "$namespace" wait job/e2e-backup-refuses-paused --for=condition=Failed --timeout=300s
+wait_connector_state PAUSED
+connector_request PUT /resume
+wait_connector_state RUNNING
+
+backups_before=$(clickhouse "SELECT count() FROM system.backups WHERE status = 'BACKUP_CREATED'")
+k -n "$namespace" create job e2e-backup-bad-credentials \
+  --from=cronjob/sink-durable-clickhouse-sink-backup --dry-run=client -o json |
+  jq '(.spec.template.spec.volumes[] | select(.name == "clickhouse-credentials").secret.secretName) = "clickhouse-bad-backup"' |
+  k apply -f -
+k -n "$namespace" wait job/e2e-backup-bad-credentials --for=condition=Failed --timeout=300s
+wait_connector_state RUNNING
+[[ $(clickhouse "SELECT count() FROM system.backups WHERE status = 'BACKUP_CREATED'") == "$backups_before" ]]
+
 k -n "$namespace" create job e2e-backup --from=cronjob/sink-durable-clickhouse-sink-backup
 k -n "$namespace" wait job/e2e-backup --for=condition=Complete --timeout=900s
-backup=$(clickhouse "SELECT name FROM system.backups WHERE status = 'BACKUP_CREATED' ORDER BY end_time DESC LIMIT 1 FORMAT TabSeparatedRaw")
+backup=$(k -n "$namespace" logs job/e2e-backup | jq -r 'select(.status == "BACKUP_CREATED") | .name')
 [[ $backup == S3\(* ]]
 restore_clickhouse "RESTORE DATABASE durable_e2e AS durable_restore FROM $backup"
 [[ $(restore_clickhouse 'SELECT count() FROM durable_restore.events') == 1100 ]]
