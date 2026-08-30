@@ -10,7 +10,7 @@ The flake compiles the Rust backup and recovery utility, runs its invariant
 tests, packages and strictly lints the Helm chart, checks negative safety
 validation, checks the E2E program, and renders the chart through Nixidy.
 
-The Rust suite covers table/database snapshot grouping; full/incremental chain
+The Rust suite covers physical-table snapshot grouping; full/incremental chain
 planning and rollover; exact KeeperMap-derived offsets; idempotent KeeperMap
 rehydration; Connect-ahead, unfinished, duplicate, out-of-range,
 overflow, and wrong-topic states; manifest tampering; independent unordered

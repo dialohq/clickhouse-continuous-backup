@@ -10,15 +10,10 @@ recovery point until its manifest is committed to the recovery topic.
 
 ## Snapshot scope
 
-`backup.snapshotScope` controls which connectors share a pause barrier:
-
-- `table` is the default. Pipelines writing the same physical target table are
-  paused together. Unrelated tables are snapshotted and resumed independently.
-- `database` pauses all pipelines writing a database together. Use it when
-  recovery must preserve cross-table consistency within that database.
-
-Each barrier produces a per-group point in time. Table scope does not claim one
-globally atomic timestamp across unrelated tables.
+One physical target table and every connector writing it form one consistency
+unit. They are paused together. Unrelated tables are snapshotted and resumed
+independently, so the protocol does not claim one globally atomic timestamp
+across tables.
 
 ## Procedure
 
@@ -27,7 +22,7 @@ globally atomic timestamp across unrelated tables.
 2. Join the recovery topic's single-partition consumer group. Holding its only
    partition serializes backup Jobs. Read and validate the current chain head.
 3. Choose either a new full backup or the next incremental in the current chain.
-4. Build deterministic table or database snapshot groups. For each group:
+4. Build deterministic physical-table snapshot groups. For each group:
 
    1. Request `PAUSED` only for connectors in that group and wait until their
       connector and task states are `PAUSED`. A paused task has completed its
@@ -112,7 +107,7 @@ KeeperMap state or changes Kafka Connect offsets.
 | Function | Phase |
 | --- | --- |
 | `run` | Preconditions, backup lock, chain planning, signal handling, final resume and cleanup |
-| `SnapshotLayout::new` | Table/database grouping and deterministic clone names |
+| `SnapshotLayout::new` | Physical-table grouping and deterministic clone names |
 | `SnapshotLayout::create` | Short per-group barriers in step 4 |
 | `snapshot::capture_checkpoints` and `backup::checkpoint` | KeeperMap-to-Kafka offset derivation |
 | `ClickHouse::clone_target` | Copy-on-write immutable part snapshot |

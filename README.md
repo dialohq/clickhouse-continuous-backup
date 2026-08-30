@@ -69,7 +69,6 @@ backup:
   namedCollection: durable_clickhouse_backups
   pathPrefix: durable-data/production
   maxIncrementalsPerFull: 6
-  snapshotScope: table
   maxBandwidthBytesPerSecond: 0
   credentialsSecret:
     name: durable-clickhouse-backup
@@ -81,9 +80,9 @@ Network, Kafka, polling, hook, and backup deadlines have chart defaults under
 `timeouts` and `backup`. Override them for the deployment's latency and backup
 size; the recovery binary does not carry fallback durations of its own.
 
-Each backup Job briefly pauses the connectors for one table or database group,
-creates copy-on-write target-table clones, captures and verifies KeeperMap
-state, and resumes that group. Compression and S3 upload operate on the
+Each backup Job briefly pauses all connectors writing one physical table,
+creates a copy-on-write target-table clone, captures and verifies their
+KeeperMap state, and resumes them. Compression and S3 upload operate on the
 immutable clones while ingestion is running. The manifest stores the exact
 KeeperMap rows and Kafka offsets. Target tables use one full backup followed by
 at most `maxIncrementalsPerFull` incrementals; `0` is the full-only default.

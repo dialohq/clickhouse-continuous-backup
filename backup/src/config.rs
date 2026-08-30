@@ -65,15 +65,8 @@ pub struct BackupConfig {
     pub recovery_topic: String,
     pub max_incrementals_per_full: u32,
     pub max_backup_bandwidth: u64,
-    pub snapshot_scope: SnapshotScope,
     pub pipelines: Vec<Pipeline>,
     pub timeouts: RuntimeTimeouts,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SnapshotScope {
-    Table,
-    Database,
 }
 
 #[derive(Clone, Debug)]
@@ -160,11 +153,6 @@ impl BackupConfig {
             recovery_topic: required("KAFKA_RECOVERY_TOPIC")?,
             max_incrementals_per_full: unsigned("MAX_INCREMENTALS_PER_FULL")?,
             max_backup_bandwidth: unsigned64("MAX_BACKUP_BANDWIDTH")?,
-            snapshot_scope: match required("SNAPSHOT_SCOPE")?.as_str() {
-                "table" => SnapshotScope::Table,
-                "database" => SnapshotScope::Database,
-                _ => bail!("SNAPSHOT_SCOPE must be table or database"),
-            },
             pipelines,
             timeouts: RuntimeTimeouts::from_environment()?,
         })

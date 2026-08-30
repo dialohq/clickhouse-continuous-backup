@@ -86,7 +86,6 @@ let
         archiveExtension: tar.zst
         maxIncrementalsPerFull: 0
         maxBandwidthBytesPerSecond: 0
-        snapshotScope: table
         pauseTimeoutSeconds: 120
         activeDeadlineSeconds: 21600
         terminationGracePeriodSeconds: 300
@@ -203,7 +202,6 @@ let
             archiveExtension = {type = "string"; enum = ["tar.zst" "tar.gz" "tar.xz" "tar.bz2" "tgz" "tzst"];};
             maxIncrementalsPerFull = {type = "integer"; minimum = 0; maximum = 9999;};
             maxBandwidthBytesPerSecond = {type = "integer"; minimum = 0;};
-            snapshotScope = {type = "string"; enum = ["table" "database"];};
             pauseTimeoutSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             activeDeadlineSeconds = {type = "integer"; minimum = 1; maximum = 604800;};
             terminationGracePeriodSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
@@ -808,7 +806,6 @@ let
                       - {name: BACKUP_ARCHIVE_EXTENSION, value: {{ .Values.backup.archiveExtension | quote }}}
                       - {name: MAX_INCREMENTALS_PER_FULL, value: {{ .Values.backup.maxIncrementalsPerFull | quote }}}
                       - {name: MAX_BACKUP_BANDWIDTH, value: {{ .Values.backup.maxBandwidthBytesPerSecond | quote }}}
-                      - {name: SNAPSHOT_SCOPE, value: {{ .Values.backup.snapshotScope | quote }}}
                       - {name: PAUSE_TIMEOUT_SECONDS, value: {{ .Values.backup.pauseTimeoutSeconds | quote }}}
                       - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
                       - {name: KAFKA_RECOVERY_TOPIC, value: {{ include "durable-clickhouse-sink.recoveryTopic" . | quote }}}

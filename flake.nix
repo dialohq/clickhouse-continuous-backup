@@ -150,7 +150,6 @@
         grep -F 'BACKUP_PIPELINES' rendered.yaml >/dev/null
         grep -F 'MAX_INCREMENTALS_PER_FULL' rendered.yaml >/dev/null
         grep -F 'MAX_BACKUP_BANDWIDTH' rendered.yaml >/dev/null
-        grep -F 'SNAPSHOT_SCOPE' rendered.yaml >/dev/null
         grep -F 'KAFKA_RECOVERY_TOPIC' rendered.yaml >/dev/null
         grep -F 'RUNTIME_TIMEOUTS' rendered.yaml >/dev/null
         grep -F 'activeDeadlineSeconds: 21600' rendered.yaml >/dev/null

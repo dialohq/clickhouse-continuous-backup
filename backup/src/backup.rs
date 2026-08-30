@@ -73,7 +73,7 @@ pub async fn run() -> Result<()> {
         &config.timeouts,
     )?;
     clickhouse.require_backup_engines(&config.pipelines).await?;
-    let snapshots = SnapshotLayout::new(&config.run_id, config.snapshot_scope, &config.pipelines);
+    let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines);
     snapshots.cleanup(&clickhouse).await?;
 
     let operation =

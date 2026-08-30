@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use crate::{
     backup::{checkpoint, require_unchanged_keeper, resume_all},
     clickhouse::ClickHouse,
-    config::{BackupConfig, SnapshotScope},
+    config::BackupConfig,
     connect::Connect,
     kafka::KafkaLog,
     model::{ConnectorCheckpoint, Pipeline},
@@ -30,13 +30,10 @@ pub(crate) struct SnapshotLayout {
 }
 
 impl SnapshotLayout {
-    pub(crate) fn new(run_id: &str, scope: SnapshotScope, pipelines: &[Pipeline]) -> Self {
+    pub(crate) fn new(run_id: &str, pipelines: &[Pipeline]) -> Self {
         let mut grouped = BTreeMap::<String, Vec<Pipeline>>::new();
         for pipeline in pipelines {
-            let key = match scope {
-                SnapshotScope::Table => format!("{}.{}", pipeline.database, pipeline.table),
-                SnapshotScope::Database => pipeline.database.clone(),
-            };
+            let key = format!("{}.{}", pipeline.database, pipeline.table);
             grouped.entry(key).or_default().push(pipeline.clone());
         }
 
@@ -206,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn table_scope_pauses_shared_targets_together() {
+    fn groups_shared_targets_together() {
         let first = pipeline();
         let mut shared = pipeline();
         shared.connector = "records-secondary".to_owned();
@@ -222,7 +219,6 @@ mod tests {
 
         let layout = SnapshotLayout::new(
             "00000000-0000-0000-0000-000000000001",
-            SnapshotScope::Table,
             &[first, shared, other],
         );
         assert_eq!(layout.groups.len(), 2);
@@ -230,25 +226,5 @@ mod tests {
         assert_eq!(layout.groups[1].pipelines.len(), 2);
         assert_eq!(layout.targets().count(), 2);
         assert_eq!(layout.backup_objects().matches(" AS ").count(), 2);
-    }
-
-    #[test]
-    fn database_scope_groups_all_tables_in_a_database() {
-        let first = pipeline();
-        let mut second = pipeline();
-        second.connector = "other".to_owned();
-        second.topic = "other.input".to_owned();
-        second.table = "other_records".to_owned();
-        second.state_table = "other_state".to_owned();
-        second.keeper_path = "/durable-clickhouse-sink/default/other".to_owned();
-
-        let layout = SnapshotLayout::new(
-            "00000000-0000-0000-0000-000000000001",
-            SnapshotScope::Database,
-            &[first, second],
-        );
-        assert_eq!(layout.groups.len(), 1);
-        assert_eq!(layout.groups[0].pipelines.len(), 2);
-        assert_eq!(layout.groups[0].targets.len(), 2);
     }
 }
