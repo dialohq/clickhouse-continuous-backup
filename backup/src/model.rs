@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const RECOVERY_POINT_FORMAT: &str = "durable-clickhouse-sink/recovery-point-v2";
-pub const CHAIN_HEAD_FORMAT: &str = "durable-clickhouse-sink/backup-chain-v1";
-pub const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head_v1";
+pub const CHAIN_HEAD_FORMAT: &str = "durable-clickhouse-sink/backup-chain-v2";
+pub const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head_v2";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Pipeline {
     pub connector: String,
@@ -21,6 +21,11 @@ impl Pipeline {
     pub fn validate(&self) -> Result<()> {
         if self.connector.is_empty() || self.topic.is_empty() || self.partitions == 0 {
             bail!("pipeline connector, topic, and positive partition count are required")
+        }
+        for (name, value) in [("connector", &self.connector), ("topic", &self.topic)] {
+            if !kafka_name(value) {
+                bail!("pipeline {name} must be a Kafka-safe name")
+            }
         }
         for (name, value) in [
             ("database", &self.database),
@@ -39,6 +44,14 @@ impl Pipeline {
         }
         Ok(())
     }
+}
+
+pub fn kafka_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 249
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -142,6 +155,7 @@ pub struct ChainHead {
     pub base: BackupReference,
     pub latest: BackupReference,
     pub incrementals: u32,
+    pub pipelines: Vec<Pipeline>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

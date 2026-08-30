@@ -7,6 +7,7 @@ use crate::{
     clickhouse::ClickHouse,
     config::RestoreConfig,
     connect::Connect,
+    kafka::KafkaLog,
     model::{ConnectorCheckpoint, KeeperRow, RecoveryPoint},
 };
 
@@ -32,6 +33,14 @@ pub async fn run() -> Result<()> {
         bail!("manifest connector set does not match this release")
     }
 
+    let connect = Connect::new(config.connect_url.clone())?;
+    for connector in &config.connector_names {
+        connect
+            .require_stopped(connector, config.stop_timeout)
+            .await?;
+    }
+
+    let kafka = KafkaLog::new(&config.kafka_bootstrap_servers, &config.kafka_properties()?)?;
     let clickhouse = ClickHouse::new(
         config.clickhouse_url,
         config.clickhouse_username,
@@ -43,8 +52,8 @@ pub async fn run() -> Result<()> {
             .await?;
         require_keeper_match(checkpoint, actual)?;
     }
+    kafka.verify(&point.connectors)?;
 
-    let connect = Connect::new(config.connect_url)?;
     for connector in &config.connector_names {
         connect
             .require_stopped(connector, config.stop_timeout)
@@ -73,6 +82,11 @@ pub async fn run() -> Result<()> {
         if actual != expected {
             bail!("connector offset verification failed: {}", checkpoint.name)
         }
+    }
+    for connector in &config.connector_names {
+        connect
+            .require_stopped(connector, config.stop_timeout)
+            .await?;
     }
     println!("{manifest}");
     Ok(())

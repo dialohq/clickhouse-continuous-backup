@@ -24,6 +24,12 @@ Subject to the documented prerequisites, the chart prevents an uncertain
 Kafka-to-ClickHouse transport retry or exact-offset disaster-recovery replay
 from creating an extra target row.
 
+Registration and backup require a MergeTree-family target with insert
+deduplication enabled. Managed topics disable size-based retention, and every
+backup checks that the exact replay offsets remain available immediately before
+the recovery point is published. Restore repeats that check before changing
+Connect offsets.
+
 It does not guarantee:
 
 - durability before a producer receives a successful Kafka acknowledgement;
@@ -38,3 +44,6 @@ It does not guarantee:
 Input topic retention must exceed the maximum age of a recovery point that may
 be restored plus the time required to detect the incident, restore ClickHouse,
 and replay the tail.
+
+See [Failure modes](failure-modes.md) for detected failures and irreducible
+cross-system transaction boundaries.

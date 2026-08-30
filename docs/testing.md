@@ -13,7 +13,9 @@ validation, checks the E2E program, and renders the chart through Nixidy.
 The Rust suite covers full/incremental chain planning and rollover; exact
 KeeperMap-derived offsets; Connect-ahead, unfinished, duplicate, out-of-range,
 overflow, and wrong-topic states; manifest tampering; independent unordered
-partitions; and MergeTree engine validation.
+partitions; Kafka truncation, topic rollback, and partition drift; recovery
+catalog partition invariants; chain-scope mismatch; and MergeTree engine and
+deduplication-setting validation.
 
 ## RKE2 end to end
 

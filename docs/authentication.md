@@ -49,8 +49,9 @@ password=...
 
 Use a dedicated writer with `INSERT` on target tables and `CREATE TABLE`,
 `SELECT`, and `INSERT` for the KeeperMap state table in each target database.
-Grant only the ClickHouse permissions required by the selected connector
-version and validate them in a non-production database.
+Registration preflight also reads `system.tables` and
+`system.merge_tree_settings`. Grant only the ClickHouse permissions required by
+the selected connector version and validate them in a non-production database.
 
 ## Backup user and object storage
 
@@ -65,7 +66,8 @@ stringData:
 
 The backup identity needs `SELECT` on the target and KeeperMap tables, access to
 `system.backups` and `system.tables`, and ClickHouse's `BACKUP` permission for
-the selected objects. The recovery identity additionally needs the restored
+the selected objects. It also reads `system.merge_tree_settings` to reject a
+disabled effective replicated deduplication window. The recovery identity additionally needs the restored
 KeeperMap `SELECT` required before offsets can be patched. Neither identity
 should be the ingestion writer.
 

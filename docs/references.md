@@ -9,6 +9,8 @@ not only this repository's summaries.
 - [Kafka Connect offset-management API (KIP-875)](https://cwiki.apache.org/confluence/display/KAFKA/KIP-875%3A+First-class+Offsets+Support+in+Kafka+Connect)
 - [ClickHouse Kafka Connect sink documentation](https://clickhouse.com/docs/integrations/connectors/data-ingestion/kafka/kafka-clickhouse-connect-sink)
 - [ClickHouse Kafka Connect exactly-once design](https://github.com/ClickHouse/clickhouse-kafka-connect/blob/main/docs/DESIGN.md)
+- [ClickHouse insert deduplication on retries and finite-window behavior](https://clickhouse.com/docs/guides/developer/deduplicating-inserts-on-retries)
+- [ClickHouse async-insert deduplication issue #110604](https://github.com/ClickHouse/ClickHouse/issues/110604)
 - [ClickHouse guidance on deduplication and ReplacingMergeTree visibility](https://clickhouse.com/blog/common-getting-started-issues-with-clickhouse)
 
 ## Backup and recovery

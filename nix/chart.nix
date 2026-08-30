@@ -132,7 +132,7 @@ let
             required = ["name" "topic" "table"];
             properties = {
               name = {type = "string"; pattern = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"; maxLength = 40;};
-              topic = {type = "string"; minLength = 1;};
+              topic = {type = "string"; pattern = "^[A-Za-z0-9._-]+$"; maxLength = 249;};
               table = {type = "string"; pattern = "^[A-Za-z_][A-Za-z0-9_]*$";};
               database = {type = "string"; pattern = "^[A-Za-z_][A-Za-z0-9_]*$";};
               retentionMs = {type = "integer"; minimum = 60000; default = 7776000000;};
@@ -154,7 +154,7 @@ let
             archiveExtension = {type = "string"; enum = ["tar.zst" "tar.gz" "tar.xz" "tar.bz2" "tgz" "tzst"];};
             maxIncrementalsPerFull = {type = "integer"; minimum = 0; maximum = 9999;};
             pauseTimeoutSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
-            recoveryTopic = {type = "string";};
+            recoveryTopic = {type = "string"; pattern = "^$|^[A-Za-z0-9._-]+$"; maxLength = 249;};
             kafkaPropertiesKey = {type = "string"; minLength = 1;};
             credentialsSecret = {
               type = "object";
@@ -483,11 +483,16 @@ let
                     create() {
                       /bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --create --if-not-exists --topic "$1" --partitions "$PARTITIONS" --replication-factor "$REPLICATION_FACTOR"
                     }
+                    verify_partitions() {
+                      description=$(/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --describe --topic "$1")
+                      [[ "$description" =~ PartitionCount:[[:space:]]+$PARTITIONS([[:space:]]|$) ]] || { echo "$1 does not have $PARTITIONS partitions: $description" >&2; exit 1; }
+                    }
                     configure() {
                       /bin/kafka-configs.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --entity-type topics --entity-name "$1" --alter --add-config "$2"
                     }
                     create "$TOPIC"
-                    configure "$TOPIC" "cleanup.policy=delete,retention.ms=$RETENTION"
+                    verify_partitions "$TOPIC"
+                    configure "$TOPIC" "cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1"
                 env:
                   - {name: BOOTSTRAP_SERVERS, value: {{ $.Values.kafka.bootstrapServers | quote }}}
                   - {name: TOPIC, value: {{ $pipeline.topic | quote }}}
@@ -543,6 +548,8 @@ let
                     config=()
                     if [[ -f /etc/kafka/client.properties ]]; then config=(--command-config /etc/kafka/client.properties); fi
                     /bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --create --if-not-exists --topic "$RECOVERY_TOPIC" --partitions 1 --replication-factor "$REPLICATION_FACTOR"
+                    description=$(/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --describe --topic "$RECOVERY_TOPIC")
+                    [[ "$description" =~ PartitionCount:[[:space:]]+1([[:space:]]|$) ]] || { echo "$RECOVERY_TOPIC does not have 1 partition: $description" >&2; exit 1; }
                     /bin/kafka-configs.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --entity-type topics --entity-name "$RECOVERY_TOPIC" --alter --add-config cleanup.policy=compact,retention.ms=-1,retention.bytes=-1
                 env:
                   - {name: BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
@@ -591,7 +598,7 @@ let
             "zkDatabase": {{ include "durable-clickhouse-sink.stateTable" (list $ $pipeline) | quote }},
             "value.converter": {{ default "org.apache.kafka.connect.json.JsonConverter" $pipeline.valueConverter | quote }},
             "value.converter.schemas.enable": {{ ternary "true" "false" (default false $pipeline.valueConverterSchemasEnable) | quote }},
-            "clickhouseSettings": "async_insert=1,wait_for_async_insert=1"{{- range $key, $value := default dict $pipeline.connectorConfig }},
+            "clickhouseSettings": "async_insert=0,insert_deduplicate=1"{{- range $key, $value := default dict $pipeline.connectorConfig }},
             {{ $key | quote }}: {{ $value | toString | quote }}{{- end }}
           }
       ---
@@ -617,6 +624,20 @@ let
             restartPolicy: OnFailure
             automountServiceAccountToken: false
             securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+            initContainers:
+              - name: validate-clickhouse-targets
+                image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
+                imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
+                command: ["/bin/durable-clickhouse-recovery", "validate-targets"]
+                env:
+                  - name: CLICKHOUSE_URL
+                    value: {{ printf "%s://%s:%v/" (ternary "https" "http" $.Values.clickhouse.secure) $.Values.clickhouse.host $.Values.clickhouse.port | quote }}
+                  - name: CLICKHOUSE_PROPERTIES_FILE
+                    value: /etc/clickhouse/clickhouse.properties
+                  - name: BACKUP_PIPELINES
+                    value: {{ include "durable-clickhouse-sink.backupPipelines" $ | quote }}
+                volumeMounts:
+                  - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
             containers:
               - name: register
                 image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
@@ -634,6 +655,12 @@ let
               - name: connector
                 configMap:
                   name: {{ $name }}-connector
+              - name: clickhouse-credentials
+                secret:
+                  secretName: {{ $.Values.clickhouse.credentialsSecret.name }}
+                  items:
+                    - key: {{ $.Values.clickhouse.credentialsSecret.propertiesKey }}
+                      path: clickhouse.properties
               - {name: tmp, emptyDir: {}}
       ---
       {{- if $.Values.connect.deleteConnectorsOnUninstall }}

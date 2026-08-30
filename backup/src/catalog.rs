@@ -54,13 +54,28 @@ impl Catalog {
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<String>> {
+        let metadata = self
+            .consumer
+            .fetch_metadata(Some(&self.topic), Duration::from_secs(15))?;
+        let [topic] = metadata.topics() else {
+            bail!("Kafka did not return exactly one recovery topic")
+        };
+        if let Some(error) = topic.error() {
+            bail!("Kafka recovery-topic metadata failed: {error:?}")
+        }
+        if topic.partitions().len() != 1 {
+            bail!("the recovery topic must have exactly one partition")
+        }
         self.consumer.subscribe(&[&self.topic])?;
         let first = tokio::time::timeout(Duration::from_secs(30), self.consumer.recv())
             .await
             .context("timed out acquiring the backup lock")?;
-        let (_, high) = self
-            .consumer
-            .fetch_watermarks(&self.topic, 0, Duration::from_secs(15))?;
+        let (low, high) =
+            self.consumer
+                .fetch_watermarks(&self.topic, 0, Duration::from_secs(15))?;
+        if low < 0 || high < low {
+            bail!("Kafka returned invalid recovery-topic watermarks: {low}..{high}")
+        }
         let mut value = None;
         match first {
             Ok(message) if inspect(&message, key, high, &mut value) => return Ok(value),

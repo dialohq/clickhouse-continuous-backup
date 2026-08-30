@@ -315,6 +315,7 @@ apply_recovery() {
       EXPECTED_BACKUP_NAME="$expected_backup" \
       RECOVERY_MANIFEST_FILE=- \
       STOP_TIMEOUT_SECONDS=120 \
+      KAFKA_BOOTSTRAP_SERVERS=redpanda:9092 \
       /bin/durable-clickhouse-recovery restore-offsets
 }
 

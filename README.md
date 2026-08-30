@@ -96,6 +96,7 @@ routine Helm change.
 
 - [Architecture and failure boundaries](docs/architecture.md)
 - [Guarantees](docs/guarantees.md)
+- [Failure modes and unhandled boundaries](docs/failure-modes.md)
 - [Schema and event contract](docs/schema.md)
 - [Authentication and credential rotation](docs/authentication.md)
 - [Backup and recovery](docs/recovery.md)

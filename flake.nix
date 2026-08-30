@@ -139,12 +139,15 @@
           exit 1
         fi
         grep -F '/bin/durable-clickhouse-recovery' rendered.yaml >/dev/null
+        grep -F 'validate-targets' rendered.yaml >/dev/null
+        grep -F 'async_insert=0,insert_deduplicate=1' rendered.yaml >/dev/null
         grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
         grep -F 'BACKUP_NAMED_COLLECTION' rendered.yaml >/dev/null
         grep -F 'BACKUP_PIPELINES' rendered.yaml >/dev/null
         grep -F 'MAX_INCREMENTALS_PER_FULL' rendered.yaml >/dev/null
         grep -F 'KAFKA_RECOVERY_TOPIC' rendered.yaml >/dev/null
         grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
+        grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F '.recovery-points' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
         [[ $(grep -c 'value: "TABLE default.events"' rendered-shared-table.yaml) == 1 ]]

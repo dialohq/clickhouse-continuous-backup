@@ -11,6 +11,12 @@ struct TableEngine {
     database: String,
     name: String,
     engine: String,
+    create_table_query: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SettingValue {
+    value: String,
 }
 
 #[derive(Clone)]
@@ -101,11 +107,15 @@ impl ClickHouse {
         .await
     }
 
-    pub async fn require_backup_engines(
-        &self,
-        pipelines: &[Pipeline],
-        incremental: bool,
-    ) -> Result<()> {
+    pub async fn require_backup_engines(&self, pipelines: &[Pipeline]) -> Result<()> {
+        self.require_engines(pipelines, true).await
+    }
+
+    pub async fn require_target_engines(&self, pipelines: &[Pipeline]) -> Result<()> {
+        self.require_engines(pipelines, false).await
+    }
+
+    async fn require_engines(&self, pipelines: &[Pipeline], require_state: bool) -> Result<()> {
         let names = pipelines
             .iter()
             .flat_map(|pipeline| {
@@ -119,10 +129,22 @@ impl ClickHouse {
             .join(", ");
         let engines: Vec<TableEngine> = self
             .json_each_row(&format!(
-                "SELECT database, name, engine FROM system.tables WHERE (database, name) IN ({names}) FORMAT JSONEachRow"
+                "SELECT database, name, engine, create_table_query FROM system.tables WHERE (database, name) IN ({names}) FORMAT JSONEachRow"
             ))
             .await?;
-        validate_engines(pipelines, &engines, incremental)
+        let defaults: Vec<SettingValue> = self
+            .json_each_row(
+                "SELECT value FROM system.merge_tree_settings WHERE name = 'replicated_deduplication_window' FORMAT JSONEachRow",
+            )
+            .await?;
+        let [default] = defaults.as_slice() else {
+            bail!("ClickHouse did not return replicated_deduplication_window")
+        };
+        let replicated_default = default
+            .value
+            .parse()
+            .context("ClickHouse returned an invalid replicated_deduplication_window")?;
+        validate_engines(pipelines, &engines, replicated_default, require_state)
     }
 
     async fn json_each_row<T: DeserializeOwned>(&self, sql: &str) -> Result<Vec<T>> {
@@ -140,7 +162,8 @@ impl ClickHouse {
 fn validate_engines(
     pipelines: &[Pipeline],
     engines: &[TableEngine],
-    incremental: bool,
+    replicated_default: u64,
+    require_state: bool,
 ) -> Result<()> {
     for pipeline in pipelines {
         let database = &pipeline.database;
@@ -149,27 +172,63 @@ fn validate_engines(
             .iter()
             .find(|engine| engine.database == database.as_str() && engine.name == table.as_str())
             .with_context(|| format!("backup table does not exist: {database}.{table}"))?;
-        if incremental && !engine.engine.ends_with("MergeTree") {
+        if !engine.engine.ends_with("MergeTree") {
             bail!(
-                "incremental backups require {database}.{table} to use MergeTree, found {}",
+                "exactly-once delivery requires {database}.{table} to use MergeTree, found {}",
                 engine.engine
             )
         }
-        let state_table = &pipeline.state_table;
-        let state = engines
-            .iter()
-            .find(|engine| {
-                engine.database == database.as_str() && engine.name == state_table.as_str()
-            })
-            .with_context(|| format!("backup table does not exist: {database}.{state_table}"))?;
-        if state.engine != "KeeperMap" {
-            bail!(
-                "recovery checkpoints require {database}.{state_table} to use KeeperMap, found {}",
-                state.engine
+        let replicated = engine.engine.contains("Replicated") || engine.engine == "SharedMergeTree";
+        if replicated {
+            if table_setting(
+                &engine.create_table_query,
+                "replicated_deduplication_window",
             )
+            .unwrap_or(replicated_default)
+                == 0
+            {
+                bail!("{database}.{table} disables replicated insert deduplication")
+            }
+        } else if table_setting(
+            &engine.create_table_query,
+            "non_replicated_deduplication_window",
+        )
+        .is_none_or(|window| window == 0)
+        {
+            bail!(
+                "non-replicated {database}.{table} must explicitly set non_replicated_deduplication_window to a positive value"
+            )
+        }
+        if require_state {
+            let state_table = &pipeline.state_table;
+            let state = engines
+                .iter()
+                .find(|engine| {
+                    engine.database == database.as_str() && engine.name == state_table.as_str()
+                })
+                .with_context(|| {
+                    format!("backup table does not exist: {database}.{state_table}")
+                })?;
+            if state.engine != "KeeperMap" {
+                bail!(
+                    "recovery checkpoints require {database}.{state_table} to use KeeperMap, found {}",
+                    state.engine
+                )
+            }
         }
     }
     Ok(())
+}
+
+fn table_setting(query: &str, name: &str) -> Option<u64> {
+    let (_, suffix) = query.split_once(name)?;
+    let suffix = suffix.trim_start().strip_prefix('=')?.trim_start();
+    suffix
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -192,6 +251,13 @@ mod tests {
             database: "history".to_owned(),
             name: name.to_owned(),
             engine: value.to_owned(),
+            create_table_query: if value.contains("Replicated") {
+                format!("CREATE TABLE history.{name} ENGINE = {value}")
+            } else {
+                format!(
+                    "CREATE TABLE history.{name} ENGINE = {value} SETTINGS non_replicated_deduplication_window = 1000"
+                )
+            },
         }
     }
 
@@ -204,6 +270,7 @@ mod tests {
                     engine("events", "ReplicatedMergeTree"),
                     engine("events_state", "KeeperMap")
                 ],
+                1000,
                 true,
             )
             .is_ok()
@@ -211,35 +278,72 @@ mod tests {
     }
 
     #[test]
-    fn rejects_append_only_engine_and_missing_state() {
+    fn rejects_non_merge_tree_missing_deduplication_and_missing_state() {
         assert!(
             validate_engines(
                 &[pipeline()],
                 &[engine("events", "Log"), engine("events_state", "KeeperMap")],
+                1000,
                 true,
             )
             .is_err()
         );
-        assert!(validate_engines(&[pipeline()], &[engine("events", "MergeTree")], true).is_err());
-    }
-
-    #[test]
-    fn full_backups_allow_other_target_engines_but_require_keeper_map() {
+        assert!(
+            validate_engines(&[pipeline()], &[engine("events", "MergeTree")], 1000, true).is_err()
+        );
+        let mut unsafe_merge_tree = engine("events", "MergeTree");
+        unsafe_merge_tree.create_table_query =
+            "CREATE TABLE history.events ENGINE = MergeTree".to_owned();
         assert!(
             validate_engines(
                 &[pipeline()],
-                &[engine("events", "Log"), engine("events_state", "KeeperMap")],
-                false,
+                &[unsafe_merge_tree, engine("events_state", "KeeperMap")],
+                1000,
+                true,
             )
-            .is_ok()
+            .is_err()
         );
+    }
+
+    #[test]
+    fn full_backups_also_require_safe_target_and_keeper_map() {
         assert!(
             validate_engines(
                 &[pipeline()],
                 &[engine("events", "MergeTree"), engine("events_state", "Log")],
-                false,
+                1000,
+                true,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_disabled_replicated_default() {
+        assert!(
+            validate_engines(
+                &[pipeline()],
+                &[
+                    engine("events", "ReplicatedMergeTree"),
+                    engine("events_state", "KeeperMap")
+                ],
+                0,
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn target_preflight_does_not_require_connector_state_yet() {
+        assert!(
+            validate_engines(
+                &[pipeline()],
+                &[engine("events", "ReplicatedMergeTree")],
+                1000,
+                false,
+            )
+            .is_ok()
         );
     }
 }

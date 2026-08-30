@@ -3,7 +3,7 @@ use std::{collections::HashMap, env, fs, path::PathBuf, time::Duration};
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
-use crate::model::Pipeline;
+use crate::model::{Pipeline, kafka_name};
 
 #[derive(Clone, Debug)]
 pub struct BackupConfig {
@@ -35,6 +35,16 @@ pub struct RestoreConfig {
     pub expected_backup_name: String,
     pub manifest_file: String,
     pub stop_timeout: Duration,
+    pub kafka_bootstrap_servers: String,
+    pub kafka_properties_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TargetConfig {
+    pub clickhouse_url: String,
+    pub clickhouse_username: String,
+    pub clickhouse_password: String,
+    pub pipelines: Vec<Pipeline>,
 }
 
 impl BackupConfig {
@@ -87,16 +97,7 @@ impl BackupConfig {
     }
 
     pub fn kafka_properties(&self) -> Result<HashMap<String, String>> {
-        let Some(path) = &self.kafka_properties_file else {
-            return Ok(HashMap::new());
-        };
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("failed to read Kafka properties from {}", path.display()))?;
-        contents
-            .lines()
-            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with(['#', '!']))
-            .map(parse_property)
-            .collect()
+        read_kafka_properties(self.kafka_properties_file.as_ref())
     }
 }
 
@@ -110,6 +111,9 @@ impl RestoreConfig {
         if connector_names.is_empty() {
             bail!("CONNECTOR_NAMES must contain at least one connector")
         }
+        if connector_names.iter().any(|name| !kafka_name(name)) {
+            bail!("CONNECTOR_NAMES contains an unsafe connector name")
+        }
         Ok(Self {
             connect_url: required("CONNECT_URL")?,
             clickhouse_url: required("CLICKHOUSE_URL")?,
@@ -119,8 +123,71 @@ impl RestoreConfig {
             expected_backup_name: required("EXPECTED_BACKUP_NAME")?,
             manifest_file: required("RECOVERY_MANIFEST_FILE")?,
             stop_timeout: seconds("STOP_TIMEOUT_SECONDS")?,
+            kafka_bootstrap_servers: required("KAFKA_BOOTSTRAP_SERVERS")?,
+            kafka_properties_file: optional("KAFKA_PROPERTIES_FILE").map(PathBuf::from),
         })
     }
+
+    pub fn kafka_properties(&self) -> Result<HashMap<String, String>> {
+        read_kafka_properties(self.kafka_properties_file.as_ref())
+    }
+}
+
+impl TargetConfig {
+    pub fn from_environment() -> Result<Self> {
+        let pipelines: Vec<Pipeline> = json("BACKUP_PIPELINES")?;
+        if pipelines.is_empty() {
+            bail!("BACKUP_PIPELINES must contain at least one pipeline")
+        }
+        for pipeline in &pipelines {
+            pipeline.validate()?;
+        }
+        let credentials = optional("CLICKHOUSE_PROPERTIES_FILE")
+            .map(|path| read_properties(&PathBuf::from(path), "ClickHouse"))
+            .transpose()?;
+        let clickhouse_username = credentials
+            .as_ref()
+            .and_then(|properties| properties.get("username").cloned())
+            .map(Ok)
+            .unwrap_or_else(|| required("CLICKHOUSE_USERNAME"))?;
+        let clickhouse_password = credentials
+            .as_ref()
+            .and_then(|properties| properties.get("password").cloned())
+            .unwrap_or_else(|| env::var("CLICKHOUSE_PASSWORD").unwrap_or_default());
+        Ok(Self {
+            clickhouse_url: required("CLICKHOUSE_URL")?,
+            clickhouse_username,
+            clickhouse_password,
+            pipelines,
+        })
+    }
+}
+
+fn read_kafka_properties(path: Option<&PathBuf>) -> Result<HashMap<String, String>> {
+    let Some(path) = path else {
+        return Ok(HashMap::new());
+    };
+    read_properties(path, "Kafka")
+}
+
+fn read_properties(path: &PathBuf, kind: &str) -> Result<HashMap<String, String>> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read {kind} properties from {}", path.display()))?;
+    let properties = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with(['#', '!']))
+        .map(parse_property)
+        .collect::<Result<Vec<_>>>()?;
+    let mut result = HashMap::new();
+    for (key, value) in properties {
+        if key.is_empty() {
+            bail!("{kind} property name must not be empty")
+        }
+        if result.insert(key.clone(), value).is_some() {
+            bail!("duplicate {kind} property: {key}")
+        }
+    }
+    Ok(result)
 }
 
 fn required(name: &str) -> Result<String> {
@@ -184,6 +251,6 @@ fn storage_path(value: &str) -> bool {
 fn parse_property(line: &str) -> Result<(String, String)> {
     let (key, value) = line
         .split_once(['=', ':'])
-        .with_context(|| format!("invalid Kafka property: {line}"))?;
+        .with_context(|| format!("invalid property: {line}"))?;
     Ok((key.trim().to_owned(), value.trim().to_owned()))
 }

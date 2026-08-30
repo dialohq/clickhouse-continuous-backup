@@ -16,9 +16,12 @@ KeeperMap["<input-topic>-<p>"].maxOffset + 1
 
 An absent KeeperMap row means offset zero. A backup is refused if a row is not
 `AFTER_PROCESSING`, a row names a partition outside the configured range, or
-Kafka Connect reports an offset ahead of KeeperMap. The versioned recovery manifest
-records the derived offsets, the observed Connect offsets, and every KeeperMap
-row so the relationship can be checked again during restore.
+Kafka Connect reports an offset ahead of KeeperMap. It also verifies every
+derived offset against the input topic's current partition count and low/high
+watermarks both before archive creation and immediately before manifest
+publication. The versioned recovery manifest records the derived offsets, the
+observed Connect offsets, and every KeeperMap row so the relationship can be
+checked again during restore.
 
 While delivery remains paused, the Job creates two native ClickHouse backups:
 
@@ -88,11 +91,17 @@ Restore into an empty ClickHouse database backed by an isolated Keeper:
 6. Point the existing Helm release at the restored ClickHouse and resume the
    connectors.
 
+Keep exclusive control of the Connect REST API from step 4 until the recovery
+command completes. The command repeatedly verifies `STOPPED`, but Connect does
+not provide an administrative lock that can prevent a concurrent resume.
+
 The recovery command requires `CONNECT_URL`, `CLICKHOUSE_URL`,
 `CLICKHOUSE_USERNAME`, `CLICKHOUSE_PASSWORD`, `CONNECTOR_NAMES`,
 `EXPECTED_BACKUP_NAME`, `RECOVERY_MANIFEST_FILE`, and
-`STOP_TIMEOUT_SECONDS`. Before it touches Kafka Connect, it reads every restored
-KeeperMap table and requires exact logical equality with the manifest.
+`STOP_TIMEOUT_SECONDS`, plus `KAFKA_BOOTSTRAP_SERVERS` and optional
+`KAFKA_PROPERTIES_FILE`. Before it touches Kafka Connect, it reads every restored
+KeeperMap table, requires exact logical equality with the manifest, and proves
+that every exact replay offset remains in Kafka.
 It then patches the exact derived offsets through Kafka Connect's standard
 offset API and reads them back for equality. It never resumes a connector. A
 partial API failure leaves all connectors stopped and is safe to retry.

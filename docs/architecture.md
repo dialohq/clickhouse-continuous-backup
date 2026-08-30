@@ -9,8 +9,10 @@ external.
 
 Each configured topic is a ClickHouse delivery journal. The connector uses
 `exactlyOnce=true`, `read_committed` isolation, no connector-side buffering,
-and `wait_for_async_insert=1`. Safety-critical settings cannot be overridden
-through `connectorConfig`.
+and synchronous inserts with `insert_deduplicate=1`. Registration rejects
+targets whose MergeTree-family insert-deduplication window is explicitly
+disabled. Safety-critical settings cannot be overridden through
+`connectorConfig`.
 
 Each connector uses a stable Keeper path and state table derived from
 `stateNamespace` and pipeline name:

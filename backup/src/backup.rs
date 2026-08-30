@@ -9,11 +9,12 @@ use crate::{
     clickhouse::ClickHouse,
     config::BackupConfig,
     connect::{Connect, validate_offsets},
+    kafka::KafkaLog,
     model::{
         BackupDependency, BackupKind, BackupOutput, BackupReference, CHAIN_HEAD_FORMAT,
         CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue,
         KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline, RECOVERY_POINT_FORMAT,
-        RecoveryPoint,
+        RecoveryPoint, kafka_name,
     },
 };
 
@@ -24,6 +25,7 @@ struct BackupPlan {
     base: Option<BackupReference>,
     chain_base: Option<BackupReference>,
     generation: u64,
+    pipelines: Vec<Pipeline>,
 }
 
 pub async fn run() -> Result<()> {
@@ -49,11 +51,12 @@ pub async fn run() -> Result<()> {
         .await?
         .map(|value| serde_json::from_str::<ChainHead>(&value).context("invalid backup chain head"))
         .transpose()?;
-    validate_head(head.as_ref())?;
+    validate_head(head.as_ref(), &config.pipelines)?;
     let plan = plan_backup(
         head.as_ref(),
         config.max_incrementals_per_full,
         &config.run_id,
+        &config.pipelines,
     );
 
     let operation = execute(&config, &connect, &catalog, &plan);
@@ -94,9 +97,7 @@ async fn execute(
         config.clickhouse_username.clone(),
         config.clickhouse_password.clone(),
     )?;
-    clickhouse
-        .require_backup_engines(&config.pipelines, config.max_incrementals_per_full > 0)
-        .await?;
+    clickhouse.require_backup_engines(&config.pipelines).await?;
     let mut checkpoints = Vec::with_capacity(config.pipelines.len());
     for pipeline in &config.pipelines {
         let observed = connect.offsets(&pipeline.connector).await?;
@@ -105,6 +106,8 @@ async fn execute(
             .await?;
         checkpoints.push(checkpoint(pipeline, observed, rows)?);
     }
+    let kafka = KafkaLog::new(&config.kafka_bootstrap_servers, &config.kafka_properties()?)?;
+    kafka.verify(&checkpoints)?;
 
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let path = match plan.kind {
@@ -147,6 +150,15 @@ async fn execute(
     let checkpoint_details = clickhouse
         .backup_details(checkpoint_id, &checkpoint_destination)
         .await?;
+    for (pipeline, checkpoint) in config.pipelines.iter().zip(&checkpoints) {
+        connect
+            .wait_paused(&pipeline.connector, config.pause_timeout)
+            .await?;
+        let current = clickhouse
+            .keeper_rows(&pipeline.database, &pipeline.state_table)
+            .await?;
+        require_unchanged_keeper(checkpoint, current)?;
+    }
     let backup = BackupReference {
         id,
         name: destination,
@@ -169,6 +181,7 @@ async fn execute(
         connectors: checkpoints,
     };
     validate_recovery_point(&recovery_point)?;
+    kafka.verify(&recovery_point.connectors)?;
     let head = next_head(plan, backup);
     let manifest = serde_json::to_string(&recovery_point)?;
     let head_value = serde_json::to_string(&head)?;
@@ -186,7 +199,28 @@ async fn execute(
     Ok(())
 }
 
-fn plan_backup(head: Option<&ChainHead>, max_incrementals: u32, run_id: &str) -> BackupPlan {
+fn require_unchanged_keeper(
+    checkpoint: &ConnectorCheckpoint,
+    mut current: Vec<KeeperRow>,
+) -> Result<()> {
+    let mut expected = checkpoint.keeper.rows.clone();
+    current.sort_by(|left, right| left.key.cmp(&right.key));
+    expected.sort_by(|left, right| left.key.cmp(&right.key));
+    if current != expected {
+        bail!(
+            "KeeperMap changed while backup was running: {}",
+            checkpoint.name
+        )
+    }
+    Ok(())
+}
+
+fn plan_backup(
+    head: Option<&ChainHead>,
+    max_incrementals: u32,
+    run_id: &str,
+    pipelines: &[Pipeline],
+) -> BackupPlan {
     match head.filter(|head| head.incrementals < max_incrementals) {
         Some(head) => BackupPlan {
             kind: BackupKind::Incremental,
@@ -195,6 +229,7 @@ fn plan_backup(head: Option<&ChainHead>, max_incrementals: u32, run_id: &str) ->
             base: Some(head.latest.clone()),
             chain_base: Some(head.base.clone()),
             generation: head.generation + 1,
+            pipelines: pipelines.to_vec(),
         },
         None => BackupPlan {
             kind: BackupKind::Full,
@@ -203,6 +238,7 @@ fn plan_backup(head: Option<&ChainHead>, max_incrementals: u32, run_id: &str) ->
             base: None,
             chain_base: None,
             generation: head.map_or(1, |head| head.generation + 1),
+            pipelines: pipelines.to_vec(),
         },
     }
 }
@@ -216,6 +252,7 @@ fn next_head(plan: &BackupPlan, backup: BackupReference) -> ChainHead {
         base,
         latest: backup,
         incrementals: plan.position,
+        pipelines: plan.pipelines.clone(),
     }
 }
 
@@ -312,7 +349,7 @@ fn checkpoint(
     })
 }
 
-fn validate_head(head: Option<&ChainHead>) -> Result<()> {
+fn validate_head(head: Option<&ChainHead>, pipelines: &[Pipeline]) -> Result<()> {
     let Some(head) = head else { return Ok(()) };
     let valid_latest = if head.incrementals == 0 {
         head.latest.kind == BackupKind::Full
@@ -327,6 +364,7 @@ fn validate_head(head: Option<&ChainHead>) -> Result<()> {
     if head.format != CHAIN_HEAD_FORMAT
         || head.generation == 0
         || head.generation == u64::MAX
+        || head.pipelines != pipelines
         || !safe_chain_id(&head.chain_id)
         || head.base.kind != BackupKind::Full
         || !backup_destination(&head.base.name)
@@ -387,8 +425,8 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
             .map(|row| &row.key)
             .collect::<Vec<_>>();
         row_keys.sort_unstable();
-        if connector.name.is_empty()
-            || connector.topic.is_empty()
+        if !kafka_name(&connector.name)
+            || !kafka_name(&connector.topic)
             || connector.partitions == 0
             || connector.offsets.len() != connector.partitions as usize
             || !clickhouse_identifier(&connector.keeper.database)
@@ -545,6 +583,7 @@ mod tests {
             base: reference(BackupKind::Full, 0),
             latest,
             incrementals,
+            pipelines: vec![pipeline()],
         }
     }
 
@@ -582,7 +621,7 @@ mod tests {
 
     #[test]
     fn first_backup_is_full() {
-        let plan = plan_backup(None, 3, "run");
+        let plan = plan_backup(None, 3, "run", &[pipeline()]);
         assert_eq!(plan.kind, BackupKind::Full);
         assert_eq!(plan.position, 0);
         assert_eq!(plan.chain_id, "run");
@@ -591,7 +630,7 @@ mod tests {
     #[test]
     fn continues_incremental_chain_until_limit() {
         let chain = head(1);
-        let plan = plan_backup(Some(&chain), 3, "run");
+        let plan = plan_backup(Some(&chain), 3, "run", &[pipeline()]);
         assert_eq!(plan.kind, BackupKind::Incremental);
         assert_eq!(plan.position, 2);
         assert_eq!(
@@ -602,8 +641,14 @@ mod tests {
 
     #[test]
     fn starts_new_full_at_limit_or_when_disabled() {
-        assert_eq!(plan_backup(Some(&head(3)), 3, "new").kind, BackupKind::Full);
-        assert_eq!(plan_backup(Some(&head(0)), 0, "new").kind, BackupKind::Full);
+        assert_eq!(
+            plan_backup(Some(&head(3)), 3, "new", &[pipeline()]).kind,
+            BackupKind::Full
+        );
+        assert_eq!(
+            plan_backup(Some(&head(0)), 0, "new", &[pipeline()]).kind,
+            BackupKind::Full
+        );
     }
 
     #[test]
@@ -731,29 +776,46 @@ mod tests {
     }
 
     #[test]
+    fn detects_keeper_movement_during_backup() {
+        let checkpoint = checkpoint(
+            &pipeline(),
+            vec![offset(0, 10)],
+            vec![row(0, 9, "AFTER_PROCESSING")],
+        )
+        .unwrap();
+        assert!(require_unchanged_keeper(&checkpoint, vec![row(0, 9, "AFTER_PROCESSING")]).is_ok());
+        assert!(
+            require_unchanged_keeper(&checkpoint, vec![row(0, 10, "AFTER_PROCESSING")]).is_err()
+        );
+    }
+
+    #[test]
     fn validates_chain_head_structure() {
-        assert!(validate_head(Some(&head(2))).is_ok());
+        assert!(validate_head(Some(&head(2)), &[pipeline()]).is_ok());
         let mut invalid = head(2);
         invalid.latest.position = 1;
-        assert!(validate_head(Some(&invalid)).is_err());
+        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
         invalid = head(2);
         invalid.base.kind = BackupKind::Incremental;
-        assert!(validate_head(Some(&invalid)).is_err());
+        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
         invalid = head(2);
         invalid.chain_id.clear();
-        assert!(validate_head(Some(&invalid)).is_err());
+        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
         invalid = head(2);
         invalid.latest.name = "S3(backups, 'root/../escape.tar.zst')".to_owned();
-        assert!(validate_head(Some(&invalid)).is_err());
+        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
         invalid = head(2);
         invalid.latest.base = Some(BackupDependency {
             id: invalid.latest.id,
             name: invalid.latest.name.clone(),
         });
-        assert!(validate_head(Some(&invalid)).is_err());
+        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
         invalid = head(2);
         invalid.generation = u64::MAX;
-        assert!(validate_head(Some(&invalid)).is_err());
+        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
+        let mut different = pipeline();
+        different.topic = "other".to_owned();
+        assert!(validate_head(Some(&head(2)), &[different]).is_err());
     }
 
     fn recovery_point() -> RecoveryPoint {
