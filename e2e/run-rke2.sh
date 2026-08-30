@@ -355,13 +355,13 @@ wait_recovery() {
 partial_offsets=$(jq '.[0:-1]' <<<"$target_offsets")
 apply_table_recovery invalid-partial invalid_partial_records "$partial_offsets"
 k -n "$namespace" wait tablerecovery/invalid-partial \
-  --for=jsonpath='{.status.conditions[?(@.reason=="ReconcileFailed")].status}'=True --timeout=300s
+  --for=jsonpath='{.status.conditions[?(@.reason=="ReconcileFailed")].reason}'=ReconcileFailed --timeout=300s
 [[ $(clickhouse 'SELECT count() FROM durable_e2e.invalid_partial_records') == 0 ]]
 
 future_offsets=$(jq '.[0].offset += 1' <<<"$target_offsets")
 apply_table_recovery invalid-future invalid_future_records "$future_offsets"
 k -n "$namespace" wait tablerecovery/invalid-future \
-  --for=jsonpath='{.status.conditions[?(@.reason=="ReconcileFailed")].status}'=True --timeout=300s
+  --for=jsonpath='{.status.conditions[?(@.reason=="ReconcileFailed")].reason}'=ReconcileFailed --timeout=300s
 [[ $(clickhouse 'SELECT count() FROM durable_e2e.invalid_future_records') == 0 ]]
 
 apply_table_recovery bounded-pitr pitr_records "$target_offsets"
@@ -422,7 +422,7 @@ jq -n --arg name "$live_connector" --argjson config "$live_config" \
 k -n "$namespace" scale deployment/sink-durable-clickhouse-sink-recovery --replicas=1
 wait_for_ready_pod app.kubernetes.io/component=recovery-controller
 k -n "$namespace" wait tablerecovery/ambiguous-restore \
-  --for=jsonpath='{.status.conditions[?(@.reason=="ReconcileFailed")].status}'=True --timeout=300s
+  --for=jsonpath='{.status.conditions[?(@.reason=="ReconcileFailed")].reason}'=ReconcileFailed --timeout=300s
 [[ $(clickhouse 'SELECT count() FROM durable_e2e.ambiguous_restore_records') == 1 ]]
 wait_recovery live-follow Streaming
 wait_count 1250 'SELECT count() FROM durable_e2e.live_records'
