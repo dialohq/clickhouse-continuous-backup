@@ -113,7 +113,6 @@ load_image() {
   nix run ".#$package.copyTo" -- "docker-archive:$archive:$image" >/dev/null
   ctr --address "$containerd_socket" --namespace k8s.io images import "$archive" >/dev/null
 }
-load_image deduplicatorImage ghcr.io/dialohq/durable-clickhouse-deduplicator:e2e
 load_image connectImage ghcr.io/dialohq/durable-clickhouse-connect:e2e
 
 manifests=$(nix build .#e2eManifests --no-link --print-out-paths)
@@ -135,7 +134,6 @@ values=$(nix build .#e2eValues --no-link --print-out-paths)
 helm --kubeconfig "$kubeconfig" upgrade --install sink "$chart" \
   --namespace "$namespace" --values "$values" --wait --timeout 10m
 
-wait_for_ready_pod app.kubernetes.io/component=deduplicator
 wait_for_ready_pod app.kubernetes.io/component=connect
 
 clickhouse() {
@@ -176,46 +174,36 @@ wait_count() {
 }
 
 start_producer() {
-  local name=$1 first=$2 last=$3 repeats=$4
-  # The single-quoted program expands inside the producer pod.
+  local name=$1 first=$2 last=$3
   # shellcheck disable=SC2016
   k -n "$namespace" run "$name" \
     --image=ghcr.io/dialohq/durable-clickhouse-connect:e2e \
     --image-pull-policy=Never \
     --restart=Never \
-    --env="FIRST=$first" --env="LAST=$last" --env="REPEATS=$repeats" \
+    --env="FIRST=$first" --env="LAST=$last" \
     --command -- /bin/bash -euc '
       for i in $(seq "$FIRST" "$LAST"); do
         value=$(printf "{\"id\":\"event-%s\",\"external_connection_id\":\"connection-%s\",\"occurred_at\":\"2026-08-29 12:00:00.000\",\"source\":\"e2e\",\"metadata\":\"sequence-%s\"}" "$i" "$i" "$i")
-        for _ in $(seq 1 "$REPEATS"); do printf "event-%s\t%s\n" "$i" "$value"; done
-      done | /bin/kafka-console-producer.sh --bootstrap-server redpanda:9092 --topic events.raw --property parse.key=true --property key.separator=$'"'"'\t'"'"'
+        printf "event-%s\t%s\n" "$i" "$value"
+      done | /bin/kafka-console-producer.sh --bootstrap-server redpanda:9092 --topic events.canonical --property parse.key=true --property key.separator=$'"'"'\t'"'"'
     '
 }
 
-start_producer initial-events 1 100 2
+start_producer initial-events 1 100
 k -n "$namespace" wait pod/initial-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
-
-conflicting='{"id":"event-1","external_connection_id":"different","occurred_at":"2026-08-29 12:00:00.000","source":"e2e","metadata":"{}"}'
-printf 'event-1\t%s\n' "$conflicting" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
-  /bin/kafka-console-producer.sh --bootstrap-server redpanda:9092 --topic events.raw --property parse.key=true --property key.separator=$'\t'
 
 wait_count 100 'SELECT count() FROM durable_e2e.events'
 wait_count 100 'SELECT uniqExact(id) FROM durable_e2e.events'
 
-start_producer crash-events 101 1100 2
+start_producer crash-events 101 1100
 for _ in {1..3}; do
   sleep 2
-  k -n "$namespace" delete pod -l app.kubernetes.io/component=deduplicator --grace-period=0 --force --wait=false
   k -n "$namespace" delete pod -l app.kubernetes.io/component=connect --grace-period=0 --force --wait=false
-  wait_for_ready_pod app.kubernetes.io/component=deduplicator
   wait_for_ready_pod app.kubernetes.io/component=connect
 done
 k -n "$namespace" wait pod/crash-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=600s
 wait_count 1100 'SELECT count() FROM durable_e2e.events'
 wait_count 1100 'SELECT uniqExact(id) FROM durable_e2e.events'
-
-conflicts=$(k -n "$namespace" exec redpanda-0 -- rpk topic consume events.conflicts -n 1 --format '%k' -X brokers=redpanda:9092)
-[[ $conflicts == event-1 ]]
 
 connector_request PUT /pause
 wait_connector_state PAUSED
@@ -257,7 +245,7 @@ base_id=$(jq -r '.recovery_point.backup.id' <<<"$base_output")
 base_manifest=$(jq --compact-output '.recovery_point' <<<"$base_output")
 jq --exit-status '.backup.kind == "full" and .backup.position == 0 and (.backup | has("base") | not)' <<<"$base_manifest" >/dev/null
 
-start_producer incremental-one-events 1101 1150 2
+start_producer incremental-one-events 1101 1150
 k -n "$namespace" wait pod/incremental-one-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 wait_count 1150 'SELECT count() FROM durable_e2e.events'
 incremental_one_output=$(run_backup e2e-backup-incremental-one)
@@ -269,7 +257,7 @@ jq --exit-status --arg id "$base_id" --arg name "$base" '
   .recovery_point.backup.base == {id: $id, name: $name}
 ' <<<"$incremental_one_output" >/dev/null
 
-start_producer incremental-two-events 1151 1200 2
+start_producer incremental-two-events 1151 1200
 k -n "$namespace" wait pod/incremental-two-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 wait_count 1200 'SELECT count() FROM durable_e2e.events'
 incremental_two_output=$(run_backup e2e-backup-incremental-two)
@@ -302,7 +290,7 @@ if ! jq --exit-status --argjson expected "$manifest" '. == $expected' <<<"$kafka
   exit 1
 fi
 
-start_producer pre-restore-tail 1201 1250 2
+start_producer pre-restore-tail 1201 1250
 k -n "$namespace" wait pod/pre-restore-tail --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 wait_count 1250 'SELECT count() FROM durable_e2e.events'
 rollover_output=$(run_backup e2e-backup-rollover)
@@ -380,7 +368,7 @@ helm --kubeconfig "$kubeconfig" upgrade sink "$chart" \
 connector_request PUT /resume
 wait_connector_state RUNNING
 
-start_producer post-restore-events 1251 1300 2
+start_producer post-restore-events 1251 1300
 k -n "$namespace" wait pod/post-restore-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 for _ in {1..240}; do
   restored=$(restore_clickhouse 'SELECT count() FROM durable_e2e.events' 2>/dev/null || true)
@@ -391,4 +379,4 @@ done
 [[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_e2e.events') == 1300 ]]
 [[ $(clickhouse 'SELECT count() FROM durable_e2e.events') == 1250 ]]
 
-echo "RKE2 E2E passed: crash recovery, bounded deduplication, conflict quarantine, exact KeeperMap offsets, full/incremental rollover, adversarial recovery rejection, tail replay, and restore cutover"
+echo "RKE2 E2E passed: Connect crash retries, exact KeeperMap offsets, full/incremental rollover, adversarial recovery rejection, tail replay, and restore cutover"

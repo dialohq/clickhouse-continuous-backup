@@ -7,8 +7,8 @@ an operator-specific secret controller.
 ## Kafka
 
 `kafka.existingSecret` contains a Java properties file under
-`kafka.propertiesKey`. Kafka Streams, Kafka Connect, and topic-management jobs
-use that file. It can contain TLS, SASL/SCRAM, or OAuth properties.
+`kafka.propertiesKey`. Kafka Connect and topic-management jobs use that file.
+It can contain TLS, SASL/SCRAM, or OAuth properties.
 
 ```properties
 security.protocol=SASL_SSL
@@ -30,10 +30,9 @@ sasl.password=...
 ssl.ca.location=/etc/ssl/certs/ca-bundle.crt
 ```
 
-The Kafka principal needs read access to raw and canonical topics; write access
-to canonical and conflict topics; transactional-ID access for each Streams
-application; and access to the Streams changelog, repartition, Connect internal,
-consumer-offset, and recovery-point resources it owns. The backup Job needs
+The Kafka principal needs read access to configured input topics and access to
+the Connect internal, consumer-offset, and recovery-point resources it owns.
+The backup Job needs
 read/write access to the recovery-point topic, transactional-ID access for its
 manifest transaction, and consumer-group access to the topic-derived
 `<recovery-topic>.backup-lock` group. Recovery tooling needs read access.
@@ -83,8 +82,8 @@ backup credentials does not require changing the chart. A projected Secret can
 update a file, but a running ClickHouse connector does
 not reconstruct its client merely because the file changed. Credential rotation
 must trigger a controlled Connect task restart before the old lease expires.
-`connect.podAnnotations` and `deduplicator.podAnnotations` are available for a
-provider-specific reload controller; the chart itself does not assume one.
+`connect.podAnnotations` is available for a provider-specific reload
+controller; the chart itself does not assume one.
 
 Short-lived credentials are safe only when the external issuer, Secret sync,
 and restart controller are tested together. Prefer renewable credentials whose

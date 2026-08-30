@@ -4,7 +4,7 @@ let
     "Chart.yaml" = ''
       apiVersion: v2
       name: durable-clickhouse-sink
-      description: Durable, deduplicated Kafka-compatible ingestion into ClickHouse
+      description: Durable Kafka-compatible ingestion into ClickHouse with backup and recovery
       type: application
       version: 0.1.0
       appVersion: 0.1.0
@@ -38,27 +38,6 @@ let
         credentialsSecret:
           name: ""
           propertiesKey: clickhouse.properties
-
-      deduplicator:
-        enabled: true
-        image:
-          repository: ghcr.io/dialohq/durable-clickhouse-deduplicator
-          tag: 0.1.0
-          pullPolicy: IfNotPresent
-        podAnnotations: {}
-        replicas: 2
-        standbyReplicas: 1
-        commitIntervalMs: 100
-        persistence:
-          enabled: true
-          size: 10Gi
-          storageClass: ""
-        resources:
-          requests:
-            cpu: 100m
-            memory: 256Mi
-          limits:
-            memory: 1Gi
 
       connect:
         image:
@@ -100,15 +79,10 @@ let
 
       pipelines: []
       # - name: events
-      #   rawTopic: events.raw
-      #   canonicalTopic: events.canonical
-      #   conflictTopic: events.conflicts
+      #   topic: events.canonical
       #   table: events
       #   database: default
-      #   rawRetentionMs: 1209600000
-      #   deduplicationRetentionMs: 2592000000
-      #   canonicalRetentionMs: 7776000000
-      #   conflictRetentionMs: 7776000000
+      #   retentionMs: 7776000000
       #   partitions: 6
       #   valueConverter: org.apache.kafka.connect.json.JsonConverter
       #   valueConverterSchemasEnable: false
@@ -155,18 +129,13 @@ let
           minItems = 1;
           items = {
             type = "object";
-            required = ["name" "rawTopic" "canonicalTopic" "conflictTopic" "table"];
+            required = ["name" "topic" "table"];
             properties = {
               name = {type = "string"; pattern = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"; maxLength = 40;};
-              rawTopic = {type = "string"; minLength = 1;};
-              canonicalTopic = {type = "string"; minLength = 1;};
-              conflictTopic = {type = "string"; minLength = 1;};
+              topic = {type = "string"; minLength = 1;};
               table = {type = "string"; pattern = "^[A-Za-z_][A-Za-z0-9_]*$";};
               database = {type = "string"; pattern = "^[A-Za-z_][A-Za-z0-9_]*$";};
-              rawRetentionMs = {type = "integer"; minimum = 60000; default = 1209600000;};
-              deduplicationRetentionMs = {type = "integer"; minimum = 60000; default = 2592000000;};
-              canonicalRetentionMs = {type = "integer"; minimum = 60000; default = 7776000000;};
-              conflictRetentionMs = {type = "integer"; minimum = 60000; default = 7776000000;};
+              retentionMs = {type = "integer"; minimum = 60000; default = 7776000000;};
               partitions = {type = "integer"; minimum = 1;};
               valueConverter = {type = "string"; minLength = 1;};
               valueConverterSchemasEnable = {type = "boolean";};
@@ -276,7 +245,7 @@ let
         "database" (default $.Values.clickhouse.database $pipeline.database)
         "state_table" (include "durable-clickhouse-sink.stateTable" (list $ $pipeline))
         "table" $pipeline.table
-        "topic" $pipeline.canonicalTopic
+        "topic" $pipeline.topic
         "partitions" (default $.Values.topics.partitions $pipeline.partitions)) -}}
       {{- end -}}
       {{- toJson $pipelines -}}
@@ -296,21 +265,14 @@ let
       {{- fail (printf "pipeline names must be unique: %s" $pipeline.name) }}
       {{- end }}
       {{- $_ := set $names $pipeline.name true }}
-      {{- range $topic := list $pipeline.rawTopic $pipeline.canonicalTopic $pipeline.conflictTopic }}
-      {{- if hasKey $topics $topic }}
-      {{- fail (printf "topic names must be unique across pipelines: %s" $topic) }}
+      {{- if hasKey $topics $pipeline.topic }}
+      {{- fail (printf "topic names must be unique across pipelines: %s" $pipeline.topic) }}
       {{- end }}
-      {{- $_ := set $topics $topic true }}
-      {{- end }}
+      {{- $_ := set $topics $pipeline.topic true }}
       {{- range $key, $_ := default dict $pipeline.connectorConfig }}
       {{- if has $key $reserved }}
       {{- fail (printf "pipeline %s cannot override safety-critical connector setting %s" $pipeline.name $key) }}
       {{- end }}
-      {{- end }}
-      {{- $rawRetention := int64 (default 1209600000 $pipeline.rawRetentionMs) }}
-      {{- $dedupeRetention := int64 (default 2592000000 $pipeline.deduplicationRetentionMs) }}
-      {{- if ge $rawRetention $dedupeRetention }}
-      {{- fail (printf "pipeline %s requires rawRetentionMs < deduplicationRetentionMs" $pipeline.name) }}
       {{- end }}
       {{- end }}
       {{- if and .Values.backup.enabled (not .Values.backup.credentialsSecret.name) }}
@@ -483,129 +445,6 @@ let
               {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 6 }}
     '';
 
-    "templates/deduplicators.yaml" = ''
-      {{- if .Values.deduplicator.enabled }}
-      {{- range $pipeline := .Values.pipelines }}
-      {{- $name := include "durable-clickhouse-sink.pipelineName" (list $ $pipeline) }}
-      apiVersion: v1
-      kind: Service
-      metadata:
-        name: {{ $name }}
-        labels:
-          {{- include "durable-clickhouse-sink.labels" $ | nindent 4 }}
-          app.kubernetes.io/component: deduplicator
-          durable-clickhouse.dialo.ai/pipeline: {{ $pipeline.name }}
-      spec:
-        clusterIP: None
-        selector:
-          app.kubernetes.io/instance: {{ $.Release.Name }}
-          app.kubernetes.io/component: deduplicator
-          durable-clickhouse.dialo.ai/pipeline: {{ $pipeline.name }}
-        ports:
-          - name: health
-            port: 8080
-      ---
-      apiVersion: apps/v1
-      kind: StatefulSet
-      metadata:
-        name: {{ $name }}
-        labels:
-          {{- include "durable-clickhouse-sink.labels" $ | nindent 4 }}
-          app.kubernetes.io/component: deduplicator
-          durable-clickhouse.dialo.ai/pipeline: {{ $pipeline.name }}
-      spec:
-        serviceName: {{ $name }}
-        replicas: {{ $.Values.deduplicator.replicas }}
-        podManagementPolicy: Parallel
-        selector:
-          matchLabels:
-            app.kubernetes.io/instance: {{ $.Release.Name }}
-            app.kubernetes.io/component: deduplicator
-            durable-clickhouse.dialo.ai/pipeline: {{ $pipeline.name }}
-        template:
-          metadata:
-            labels:
-              {{- include "durable-clickhouse-sink.labels" $ | nindent 8 }}
-              app.kubernetes.io/component: deduplicator
-              durable-clickhouse.dialo.ai/pipeline: {{ $pipeline.name }}
-            {{- with $.Values.deduplicator.podAnnotations }}
-            annotations:
-              {{- toYaml . | nindent 8 }}
-            {{- end }}
-          spec:
-            serviceAccountName: {{ include "durable-clickhouse-sink.fullname" $ }}
-            automountServiceAccountToken: false
-            terminationGracePeriodSeconds: 60
-            securityContext:
-              runAsNonRoot: true
-              runAsUser: 65532
-              runAsGroup: 65532
-              fsGroup: 65532
-            {{- with $.Values.imagePullSecrets }}
-            imagePullSecrets:
-              {{- toYaml . | nindent 8 }}
-            {{- end }}
-            containers:
-              - name: deduplicator
-                image: "{{ $.Values.deduplicator.image.repository }}:{{ $.Values.deduplicator.image.tag }}"
-                imagePullPolicy: {{ $.Values.deduplicator.image.pullPolicy }}
-                env:
-                  - {name: APPLICATION_ID, value: {{ printf "%s-%s-v1" (include "durable-clickhouse-sink.fullname" $) $pipeline.name | quote }}}
-                  - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ $.Values.kafka.bootstrapServers | quote }}}
-                  - {name: INPUT_TOPIC, value: {{ $pipeline.rawTopic | quote }}}
-                  - {name: OUTPUT_TOPIC, value: {{ $pipeline.canonicalTopic | quote }}}
-                  - {name: CONFLICT_TOPIC, value: {{ $pipeline.conflictTopic | quote }}}
-                  - {name: DEDUPLICATION_RETENTION_MS, value: {{ int64 (default 2592000000 $pipeline.deduplicationRetentionMs) | quote }}}
-                  - {name: REPLICATION_FACTOR, value: {{ $.Values.kafka.replicationFactor | quote }}}
-                  - {name: STANDBY_REPLICAS, value: {{ $.Values.deduplicator.standbyReplicas | quote }}}
-                  - {name: COMMIT_INTERVAL_MS, value: {{ $.Values.deduplicator.commitIntervalMs | quote }}}
-                  - {name: STATE_DIR, value: /var/lib/deduplicator/state}
-                  {{- if $.Values.kafka.existingSecret }}
-                  - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka/client.properties}
-                  {{- end }}
-                ports:
-                  - {name: health, containerPort: 8080}
-                readinessProbe:
-                  httpGet: {path: /ready, port: health}
-                  periodSeconds: 5
-                  failureThreshold: 60
-                livenessProbe:
-                  httpGet: {path: /health, port: health}
-                  initialDelaySeconds: 30
-                  periodSeconds: 15
-                resources:
-                  {{- toYaml $.Values.deduplicator.resources | nindent 18 }}
-                volumeMounts:
-                  - {name: state, mountPath: /var/lib/deduplicator}
-                  {{- if $.Values.kafka.existingSecret }}
-                  - {name: kafka-client, mountPath: /etc/kafka, readOnly: true}
-                  {{- end }}
-            {{- if not $.Values.deduplicator.persistence.enabled }}
-            volumes:
-              - {name: state, emptyDir: {}}
-              {{- include "durable-clickhouse-sink.kafkaSecretVolume" $ | nindent 6 }}
-            {{- else if $.Values.kafka.existingSecret }}
-            volumes:
-              {{- include "durable-clickhouse-sink.kafkaSecretVolume" $ | nindent 6 }}
-            {{- end }}
-        {{- if $.Values.deduplicator.persistence.enabled }}
-        volumeClaimTemplates:
-          - metadata:
-              name: state
-            spec:
-              accessModes: [ReadWriteOnce]
-              {{- with $.Values.deduplicator.persistence.storageClass }}
-              storageClassName: {{ . }}
-              {{- end }}
-              resources:
-                requests:
-                  storage: {{ $.Values.deduplicator.persistence.size }}
-        {{- end }}
-      ---
-      {{- end }}
-      {{- end }}
-    '';
-
     "templates/topics.yaml" = ''
       {{- if .Values.topics.manage }}
       {{- range $pipeline := .Values.pipelines }}
@@ -647,20 +486,12 @@ let
                     configure() {
                       /bin/kafka-configs.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --entity-type topics --entity-name "$1" --alter --add-config "$2"
                     }
-                    create "$RAW_TOPIC"
-                    create "$CANONICAL_TOPIC"
-                    create "$CONFLICT_TOPIC"
-                    configure "$RAW_TOPIC" "cleanup.policy=delete,retention.ms=$RAW_RETENTION,message.timestamp.type=LogAppendTime"
-                    configure "$CANONICAL_TOPIC" "cleanup.policy=delete,retention.ms=$CANONICAL_RETENTION"
-                    configure "$CONFLICT_TOPIC" "cleanup.policy=delete,retention.ms=$CONFLICT_RETENTION"
+                    create "$TOPIC"
+                    configure "$TOPIC" "cleanup.policy=delete,retention.ms=$RETENTION"
                 env:
                   - {name: BOOTSTRAP_SERVERS, value: {{ $.Values.kafka.bootstrapServers | quote }}}
-                  - {name: RAW_TOPIC, value: {{ $pipeline.rawTopic | quote }}}
-                  - {name: CANONICAL_TOPIC, value: {{ $pipeline.canonicalTopic | quote }}}
-                  - {name: CONFLICT_TOPIC, value: {{ $pipeline.conflictTopic | quote }}}
-                  - {name: RAW_RETENTION, value: {{ int64 (default 1209600000 $pipeline.rawRetentionMs) | quote }}}
-                  - {name: CANONICAL_RETENTION, value: {{ int64 (default 7776000000 $pipeline.canonicalRetentionMs) | quote }}}
-                  - {name: CONFLICT_RETENTION, value: {{ int64 (default 7776000000 $pipeline.conflictRetentionMs) | quote }}}
+                  - {name: TOPIC, value: {{ $pipeline.topic | quote }}}
+                  - {name: RETENTION, value: {{ int64 (default 7776000000 $pipeline.retentionMs) | quote }}}
                   - {name: PARTITIONS, value: {{ default $.Values.topics.partitions $pipeline.partitions | quote }}}
                   - {name: REPLICATION_FACTOR, value: {{ $.Values.kafka.replicationFactor | quote }}}
                 {{- if $.Values.kafka.existingSecret }}
@@ -744,8 +575,8 @@ let
           {
             "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
             "tasks.max": {{ $.Values.connect.tasksMax | quote }},
-            "topics": {{ $pipeline.canonicalTopic | quote }},
-            "topic2TableMap": {{ printf "%s=%s" $pipeline.canonicalTopic $pipeline.table | quote }},
+            "topics": {{ $pipeline.topic | quote }},
+            "topic2TableMap": {{ printf "%s=%s" $pipeline.topic $pipeline.table | quote }},
             "hostname": {{ $.Values.clickhouse.host | quote }},
             "port": {{ $.Values.clickhouse.port | quote }},
             "ssl": {{ ternary "true" "false" $.Values.clickhouse.secure | quote }},

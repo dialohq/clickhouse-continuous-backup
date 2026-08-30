@@ -1,5 +1,5 @@
 {
-  description = "Durable, deduplicated Kafka-compatible ingestion into ClickHouse";
+  description = "Durable Kafka-compatible ingestion into ClickHouse with backup and recovery";
 
   nixConfig = {
     extra-substituters = ["https://nix-community.cachix.org"];
@@ -24,9 +24,8 @@
   in {
     packages = forAllSystems (system: let
       pkgs = import nixpkgs {inherit system;};
-      deduplicator = pkgs.callPackage ./nix/deduplicator.nix {};
       backup = pkgs.callPackage ./nix/backup.nix {};
-      images = import ./nix/images.nix {inherit pkgs system backup deduplicator nix2container;};
+      images = import ./nix/images.nix {inherit pkgs system backup nix2container;};
       chartSource = pkgs.callPackage ./nix/chart.nix {};
       chart = pkgs.runCommand "durable-clickhouse-sink-chart-0.1.0" {nativeBuildInputs = [pkgs.kubernetes-helm];} ''
         mkdir -p $out
@@ -55,16 +54,6 @@
           database = "durable_e2e";
           credentialsSecret.name = "clickhouse-credentials";
         };
-        deduplicator = {
-          replicas = 1;
-          standbyReplicas = 0;
-          persistence.enabled = false;
-          image = {
-            repository = "ghcr.io/dialohq/durable-clickhouse-deduplicator";
-            tag = "e2e";
-            pullPolicy = "Never";
-          };
-        };
         connect = {
           replicas = 1;
           tasksMax = 1;
@@ -85,20 +74,14 @@
         };
         pipelines = [{
           name = "events";
-          rawTopic = "events.raw";
-          canonicalTopic = "events.canonical";
-          conflictTopic = "events.conflicts";
+          topic = "events.canonical";
           table = "events";
-          rawRetentionMs = 600000;
-          deduplicationRetentionMs = 1200000;
-          canonicalRetentionMs = 3600000;
-          conflictRetentionMs = 3600000;
+          retentionMs = 3600000;
           partitions = 3;
         }];
       };
     in {
-      inherit backup deduplicator chart chartSource e2eValues;
-      deduplicatorImage = images.deduplicator;
+      inherit backup chart chartSource e2eValues;
       connectImage = images.connect;
       manifests = nixidyEnv.environmentPackage;
       e2eManifests = e2eEnv.environmentPackage;
@@ -109,7 +92,7 @@
       packages = self.packages.${system};
       pkgs = import nixpkgs {inherit system;};
     in {
-      inherit (packages) backup deduplicator manifests e2eManifests;
+      inherit (packages) backup manifests e2eManifests;
       e2eScript = pkgs.runCommand "check-e2e-script" {
         nativeBuildInputs = [pkgs.bash pkgs.shellcheck];
       } ''
@@ -125,9 +108,7 @@
           --set-string clickhouse.host=clickhouse.example
           --set-string clickhouse.credentialsSecret.name=clickhouse-credentials
           --set-string 'pipelines[0].name=events'
-          --set-string 'pipelines[0].rawTopic=events.raw'
-          --set-string 'pipelines[0].canonicalTopic=events.canonical'
-          --set-string 'pipelines[0].conflictTopic=events.conflicts'
+          --set-string 'pipelines[0].topic=events.canonical'
           --set-string 'pipelines[0].table=events'
           --set backup.enabled=true
           --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
@@ -136,9 +117,7 @@
         helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
         helm template test ${packages.chartSource} "''${chart_args[@]}" \
           --set-string 'pipelines[1].name=other' \
-          --set-string 'pipelines[1].rawTopic=other.raw' \
-          --set-string 'pipelines[1].canonicalTopic=other.canonical' \
-          --set-string 'pipelines[1].conflictTopic=other.conflicts' \
+          --set-string 'pipelines[1].topic=other.canonical' \
           --set-string 'pipelines[1].table=events' > rendered-shared-table.yaml
 
         expect_rejected() {
@@ -148,14 +127,11 @@
           fi
         }
         expect_rejected --set-string 'pipelines[0].connectorConfig.exactlyOnce=false'
-        expect_rejected --set-string 'pipelines[0].rawRetentionMs=2592000000'
         expect_rejected --set backup.pauseTimeoutSeconds=0
         expect_rejected --set-string "backup.pathPrefix=invalid')"
         expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
         expect_rejected --set-string 'pipelines[1].name=events' \
-          --set-string 'pipelines[1].rawTopic=other.raw' \
-          --set-string 'pipelines[1].canonicalTopic=other.canonical' \
-          --set-string 'pipelines[1].conflictTopic=other.conflicts' \
+          --set-string 'pipelines[1].topic=other.canonical' \
           --set-string 'pipelines[1].table=other_events'
 
         if grep -F "Disk('" rendered.yaml; then
@@ -180,9 +156,7 @@
       default = pkgs.mkShell {
         packages = [
           pkgs.apacheKafka
-          pkgs.jdk
           pkgs.jq
-          pkgs.kotlin
           pkgs.kubeconform
           pkgs.kubectl
           pkgs.kubernetes-helm

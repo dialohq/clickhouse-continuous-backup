@@ -3,15 +3,14 @@
 The chart is schema-tool-neutral. It does not create target tables, install a
 schema registry, or own schema migrations.
 
-## Record envelope
-
-The Kafka key is the immutable event ID. The serialized value is passed through
-the deduplicator without decoding and is interpreted only by the configured
-Kafka Connect converter.
+The configured Kafka Connect converter interprets each serialized value. JSON
+without an embedded Connect schema is the default. Avro, Protobuf, and JSON
+Schema can be supported by supplying matching converters and configuration in a
+custom Connect image.
 
 For durable append-only events, prefer a wide target table with stable IDs and
 typed fields used by common filters. Mutable display names belong in reference
-tables or dictionaries so they can be renamed without rewriting event history.
+tables or dictionaries so they can be renamed without rewriting history.
 Source-specific or sparse attributes belong in a JSON column.
 
 A typical logical shape is:
@@ -33,18 +32,6 @@ metadata                   source-specific JSON
 Do not copy campaign, tenant, agent, or platform names into the durable fact row
 when an ID can be joined to the current name.
 
-## Serialization and schema registry
-
-JSON without an embedded Connect schema is the default because it needs no
-registry. Avro, Protobuf, and JSON Schema are supported by supplying the matching
-Kafka Connect converter and its configuration in a custom Connect image. The
-deduplicator remains independent of that choice because it compares serialized
-bytes.
-
 Schema compatibility policy and subject naming belong to the chosen registry.
 Target ClickHouse evolution belongs to the caller's migration tool. Deploy a
 backward-compatible target change before producing records that require it.
-
-Changing serialization can make semantically identical values byte-different.
-Use a new topic or complete the transition outside the active deduplication
-horizon rather than silently switching encoding in place.

@@ -2,19 +2,15 @@
 
 ## Components
 
-The chart runs one Kafka Streams application per pipeline and one distributed
-Kafka Connect cluster per Helm release. Target schemas, Kafka-compatible
-brokers, ClickHouse, Keeper, and object storage remain external.
+The chart runs one distributed Kafka Connect cluster per Helm release and one
+official ClickHouse sink connector per pipeline. Target schemas,
+Kafka-compatible brokers, ClickHouse, Keeper, and object storage remain
+external.
 
-The raw topic is the producer-facing retry boundary. The deduplicator stores a
-SHA-256 digest and timestamp for each key in a persistent window store. Its
-canonical and conflict outputs are produced with Kafka transactions. Consumers
-of those topics use `read_committed` isolation.
-
-The canonical topic is the ClickHouse delivery journal. The official ClickHouse
-connector is configured with `exactlyOnce=true`, no connector-side buffering,
-and `wait_for_async_insert=1`. Safety-critical connector settings cannot be
-overridden through `connectorConfig`.
+Each configured topic is a ClickHouse delivery journal. The connector uses
+`exactlyOnce=true`, `read_committed` isolation, no connector-side buffering,
+and `wait_for_async_insert=1`. Safety-critical settings cannot be overridden
+through `connectorConfig`.
 
 Each connector uses a stable Keeper path and state table derived from
 `stateNamespace` and pipeline name:
@@ -24,37 +20,34 @@ Each connector uses a stable Keeper path and state table derived from
 durable_sink_<stateNamespace>_<pipeline>_state
 ```
 
-The state table is created in the target database. Each recovery point stores
+The state table is created in the target database. Every recovery point stores
 it in an independent full checkpoint; it is never part of the incremental event
 table chain.
 
 ## Why the target is not ReplacingMergeTree
 
-`ReplacingMergeTree` resolves rows with the same sorting key during background
-merges. Until a merge occurs, ordinary queries can observe duplicates unless
-they use `FINAL`. That is useful for current-state and CDC models, but it is not
-a transport commit protocol.
+`ReplacingMergeTree` resolves equal sorting keys during background merges.
+Ordinary queries may observe both rows before a merge unless they use `FINAL`.
+That is useful for current-state and CDC models, but it is not a transport
+commit protocol.
 
-This chart deduplicates logical producer retries before the canonical log and
-deduplicates deterministic ClickHouse insert retries at the insertion boundary.
-The target can therefore remain a normal append-only MergeTree-family table.
+The connector retries uncertain inserts as deterministic ClickHouse blocks, so
+ClickHouse insert-block deduplication handles transport retries. Logical
+duplicates already present in the input topic are separate records and remain
+separate rows. If that is not desired, place the independent Kafka Event
+Deduplicator before this chart.
 
 ## Failure behavior
 
 | Failure point | Recovery source | Result |
 | --- | --- | --- |
-| producer retries after uncertain Kafka acknowledgement | raw topic key and bounded state | one canonical record |
-| deduplicator dies before transaction commit | raw topic | state and output are both retried |
-| deduplicator dies after transaction commit | Kafka transaction | committed output is visible once |
-| Connect dies before ClickHouse acknowledgement | canonical topic and KeeperMap | deterministic block retry |
-| Connect dies after insert but before Kafka offset commit | KeeperMap and ClickHouse block hash | inserted block is not duplicated |
-| local deduplicator volume is lost | Streams changelog | state is restored before readiness |
-| ClickHouse data loss | incremental/full event backup, full KeeperMap checkpoint, manifest, and retained canonical log | verified exact-offset tail replay |
+| Connect dies before ClickHouse acknowledgement | input topic and KeeperMap | deterministic block retry |
+| Connect dies after insert but before offset commit | KeeperMap and ClickHouse block hash | inserted block is not duplicated |
+| ClickHouse data loss | event backup, full KeeperMap checkpoint, recovery manifest, and retained input log | verified exact-offset tail replay |
 
-## Producer boundary
+## Boundaries
 
-The chart deliberately starts at Kafka. A producer may use a local file,
-SQLite, an application outbox, or another durable spool, but it must retain the
-record until Kafka acknowledges it with the durability policy required by the
-deployment. That producer-to-Kafka transaction belongs in the producing
-application because this chart cannot atomically modify application state.
+The chart starts at Kafka. Producer durability, producer retry identity, and
+logical-event deduplication belong upstream. The chart neither installs nor
+calls the Kafka Event Deduplicator; composition is performed by setting this
+chart's `pipelines[].topic` to the deduplicator's output topic.

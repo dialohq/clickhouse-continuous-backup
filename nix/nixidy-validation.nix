@@ -21,9 +21,7 @@
         };
         pipelines = [{
           name = "events";
-          rawTopic = "events.raw";
-          canonicalTopic = "events.canonical";
-          conflictTopic = "events.conflicts";
+          topic = "events.canonical";
           table = "events";
         }];
       };

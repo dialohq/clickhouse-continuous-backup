@@ -1,65 +1,40 @@
 # Guarantees
 
-## Logical-event boundary
+## Delivery boundary
 
-For a configured horizon `D`, the first record observed for a Kafka key is
-published to the canonical topic. The following cases are then distinguished:
-
-- same key and byte-identical value during `D`: discarded as a retry;
-- same key and different value during `D`: written to the conflict topic;
-- same key after `D`: accepted as a new input under this bounded contract.
-
-The raw topic uses broker append timestamps. The chart requires
-`rawRetentionMs < deduplicationRetentionMs`, which ensures no record still
-retained in the raw recovery log can outlive its deduplication entry.
-
-The event ID must be globally stable for at least the full horizon. An empty key
-or a producer that generates a new key on retry defeats logical deduplication.
-
-## Transaction boundaries
-
-Kafka Streams `exactly_once_v2` atomically commits the consumed raw offset, the
-deduplication state update, and the canonical or conflict output. Its local
-RocksDB store is a cache; Kafka's changelog is the recoverable copy.
-
-The official ClickHouse sink establishes a second boundary. For each canonical
-topic partition it stores the deterministic batch offset range and processing
+For every Kafka record consumed by a managed connector, the official
+ClickHouse sink records the deterministic batch offset range and processing
 state in a ClickHouse `KeeperMap` table. An uncertain insert is retried as the
 same ClickHouse block, allowing ClickHouse insert-block deduplication to remove
-the retry.
-
-These are two coordinated exactly-once scopes, not a distributed transaction
-from the producer's local storage through ClickHouse.
+the transport retry.
 
 At a recovery point, connectors are drained and paused. The manifest derives
 the next Kafka offset from the backed-up KeeperMap `maxOffset + 1`, not from a
 potentially lagging Kafka Connect commit. Event data and a full KeeperMap
 checkpoint are backed up separately. Recovery verifies the restored KeeperMap
-against the manifest before patching Connect, then verifies Connect's read-back
+against the manifest before patching Connect and verifies Connect's read-back
 before it may be resumed.
+
+This is an exactly-once delivery boundary for Kafka records, not a distributed
+transaction from a producer's local storage through ClickHouse.
 
 ## What is and is not promised
 
-The chart guarantees no duplicate canonical record within `D`, and no duplicate
-ClickHouse insert caused by replay at either managed processing boundary,
-provided all prerequisites and recovery identities are preserved.
+Subject to the documented prerequisites, the chart prevents an uncertain
+Kafka-to-ClickHouse transport retry or exact-offset disaster-recovery replay
+from creating an extra target row.
 
 It does not guarantee:
 
-- durability before the producer receives a successful Kafka acknowledgement;
-- permanent deduplication of an ID reused after `D`;
-- semantic equivalence of differently serialized values;
+- durability before a producer receives a successful Kafka acknowledgement;
+- deduplication of two Kafka records that represent the same logical event;
 - exactly-once side effects outside Kafka or ClickHouse;
-- recovery after loss of both ClickHouse backups and the required Kafka log and
-  internal topics;
-- correctness after manually rewinding only Kafka consumer offsets or only the
-  connector's KeeperMap state.
+- recovery after loss of both ClickHouse backups and the required Kafka input
+  and internal topics;
+- correctness after manually rewinding only Connect offsets or only KeeperMap;
 - safe incremental backup of target engines outside the MergeTree family;
 - automatic object-store retention or deletion of incremental dependencies.
 
-Required retention relationships are:
-
-```text
-maximum producer retry age < raw topic retention < deduplication retention
-maximum ClickHouse recovery point age < canonical topic and recovery-manifest retention
-```
+Input topic retention must exceed the maximum age of a recovery point that may
+be restored plus the time required to detect the incident, restore ClickHouse,
+and replay the tail.

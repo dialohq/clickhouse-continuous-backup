@@ -5,8 +5,6 @@ not only this repository's summaries.
 
 ## Processing and delivery
 
-- [Apache Kafka Streams core concepts: exactly-once state, offsets, and output](https://kafka.apache.org/33/streams/core-concepts/)
-- [Apache Kafka 4.2 Streams configuration](https://kafka.apache.org/42/streams/developer-guide/config-streams/)
 - [Kafka Connect user guide and REST API](https://kafka.apache.org/42/kafka-connect/)
 - [Kafka Connect offset-management API (KIP-875)](https://cwiki.apache.org/confluence/display/KAFKA/KIP-875%3A+First-class+Offsets+Support+in+Kafka+Connect)
 - [ClickHouse Kafka Connect sink documentation](https://clickhouse.com/docs/integrations/connectors/data-ingestion/kafka/kafka-clickhouse-connect-sink)

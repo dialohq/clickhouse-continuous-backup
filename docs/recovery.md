@@ -11,7 +11,7 @@ Kafka Connect's committed offset is observational only: it can lag a completed
 ClickHouse write. The authoritative next offset for partition `p` is:
 
 ```text
-KeeperMap["<canonical-topic>-<p>"].maxOffset + 1
+KeeperMap["<input-topic>-<p>"].maxOffset + 1
 ```
 
 An absent KeeperMap row means offset zero. A backup is refused if a row is not
@@ -50,7 +50,7 @@ dependency chain. Every dependency must remain available.
 The chart does not delete external object-store data. Retention must delete a
 closed `chains/<chain-id>/` prefix as a unit, never individual members of a live
 chain. Keep at least the number of complete chains required by the recovery
-policy. Kafka's canonical topics, Streams changelogs, Connect internal topics,
+policy. Kafka input topics, Connect internal topics,
 and recovery topic require their own replication and disaster-recovery policy.
 
 ## Failure behavior
@@ -71,7 +71,7 @@ on a clean disaster-recovery server.
 ## Exact disaster recovery
 
 Preserve the Helm release name, `stateNamespace`, pipeline and connector names,
-canonical topic names and partition counts, target database/table names,
+input topic names and partition counts, target database/table names,
 KeeperMap table names, and Kafka Connect internal-topic identities.
 
 Restore into an empty ClickHouse database backed by an isolated Keeper:
