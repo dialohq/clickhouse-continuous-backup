@@ -11,7 +11,7 @@ use serde::{
     de::{DeserializeOwned, Error as _},
 };
 
-use crate::model::Pipeline;
+use crate::model::{Pipeline, clickhouse_identifier, safe_chain_id, safe_storage_path};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,16 +108,13 @@ impl BackupConfig {
         config.run_id = required("BACKUP_RUN_ID")?;
         config.clickhouse_username = required("CLICKHOUSE_USERNAME")?;
         config.clickhouse_password = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
-        validate_token("BACKUP_RUN_ID", &config.run_id, |character| {
-            character.is_ascii_alphanumeric() || character == '-'
-        })?;
+        if !safe_chain_id(&config.run_id) {
+            bail!("BACKUP_RUN_ID contains unsupported characters")
+        }
         if !clickhouse_identifier(&config.named_collection) {
             bail!("namedCollection must be a ClickHouse identifier")
         }
-        validate_token("pathPrefix", &config.path_prefix, |character| {
-            character.is_ascii_alphanumeric() || "_./-".contains(character)
-        })?;
-        if !storage_path(&config.path_prefix) {
+        if !safe_storage_path(&config.path_prefix) {
             bail!("pathPrefix must be a relative object path without empty, . or .. segments")
         }
         if !["tar.zst", "tar.gz", "tar.xz", "tar.bz2", "tgz", "tzst"]
@@ -194,28 +191,6 @@ fn validate_pipelines(pipelines: &[Pipeline]) -> Result<()> {
     }
     pipelines.iter().try_for_each(Pipeline::validate)?;
     Ok(())
-}
-
-fn clickhouse_identifier(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters
-        .next()
-        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-fn validate_token(name: &str, value: &str, allowed: impl Fn(char) -> bool) -> Result<()> {
-    if value.is_empty() || !value.chars().all(allowed) {
-        bail!("{name} contains unsupported characters")
-    }
-    Ok(())
-}
-
-fn storage_path(value: &str) -> bool {
-    !value.starts_with('/')
-        && value
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 fn parse_property(line: &str) -> Result<(String, String)> {

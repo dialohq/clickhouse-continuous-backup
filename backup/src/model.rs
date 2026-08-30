@@ -18,8 +18,8 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn validate(&self) -> Result<()> {
-        if self.connector.is_empty() || self.topic.is_empty() || self.partitions == 0 {
-            bail!("pipeline connector, topic, and positive partition count are required")
+        if self.partitions == 0 {
+            bail!("pipeline partition count must be positive")
         }
         for (name, value) in [("connector", &self.connector), ("topic", &self.topic)] {
             if !kafka_name(value) {
@@ -31,27 +31,11 @@ impl Pipeline {
             ("state_table", &self.state_table),
             ("table", &self.table),
         ] {
-            let mut characters = value.chars();
-            if !characters
-                .next()
-                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-                || !characters
-                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
-            {
+            if !clickhouse_identifier(value) {
                 bail!("pipeline {name} must be a ClickHouse identifier")
             }
         }
-        if !self.keeper_path.starts_with('/')
-            || !self
-                .keeper_path
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "_/-".contains(character))
-            || self
-                .keeper_path
-                .split('/')
-                .skip(1)
-                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-        {
+        if !safe_keeper_path(&self.keeper_path) {
             bail!("pipeline keeper_path must be an absolute safe Keeper path")
         }
         Ok(())
@@ -64,6 +48,41 @@ pub fn kafka_name(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+}
+
+pub fn clickhouse_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+pub fn safe_chain_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
+pub fn safe_keeper_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_/-".contains(character))
+        && safe_path_segments(value.split('/').skip(1))
+}
+
+pub fn safe_storage_path(value: &str) -> bool {
+    !value.starts_with('/')
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character))
+        && safe_path_segments(value.split('/'))
+}
+
+fn safe_path_segments<'a>(mut segments: impl Iterator<Item = &'a str>) -> bool {
+    segments.all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

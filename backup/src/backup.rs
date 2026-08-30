@@ -13,7 +13,8 @@ use crate::{
     model::{
         BackupDependency, BackupDetails, BackupKind, BackupManifest, BackupOutput, BackupReference,
         CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue,
-        KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline, kafka_name,
+        KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline, clickhouse_identifier, kafka_name,
+        safe_chain_id, safe_keeper_path, safe_storage_path,
     },
     snapshot::SnapshotLayout,
 };
@@ -505,32 +506,6 @@ fn has_duplicates<T: Ord>(mut values: Vec<T>) -> bool {
     values.windows(2).any(|pair| pair[0] == pair[1])
 }
 
-fn clickhouse_identifier(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters
-        .next()
-        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-fn safe_chain_id(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
-}
-
-fn safe_keeper_path(value: &str) -> bool {
-    value.starts_with('/')
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_/-".contains(character))
-        && value
-            .split('/')
-            .skip(1)
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
-}
-
 fn backup_destination(value: &str) -> bool {
     let Some((collection, path)) = value
         .strip_prefix("S3(")
@@ -539,14 +514,7 @@ fn backup_destination(value: &str) -> bool {
     else {
         return false;
     };
-    clickhouse_identifier(collection)
-        && !path.starts_with('/')
-        && path
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character))
-        && path
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    clickhouse_identifier(collection) && safe_storage_path(path)
 }
 
 pub(crate) async fn resume_all(connect: &Connect, connectors: &[&str]) -> Result<()> {
