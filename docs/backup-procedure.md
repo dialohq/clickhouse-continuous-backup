@@ -1,95 +1,122 @@
 # Backup procedure
 
 A backup Job coordinates Kafka Connect, ClickHouse, Kafka, and object storage.
-None of those systems provides a transaction spanning all four, so the Job
-creates immutable artifacts first and makes them recoverable with one final
-Kafka transaction.
+There is no transaction spanning those systems. The protocol therefore creates
+an immutable ClickHouse snapshot during a short ingestion barrier, resumes
+delivery, uploads that snapshot, and finally commits a recovery manifest.
 
-The recovery-catalog transaction is the commit point. A ClickHouse archive is
-not a recovery point until its manifest is committed to the recovery topic.
+The recovery-catalog transaction is the commit point. An archive is not a
+recovery point until its manifest is committed to the recovery topic.
+
+## Snapshot scope
+
+`backup.snapshotScope` controls which connectors share a pause barrier:
+
+- `table` is the default. Pipelines writing the same physical target table are
+  paused together. Unrelated tables are snapshotted and resumed independently.
+- `database` pauses all pipelines writing a database together. Use it when
+  recovery must preserve cross-table consistency within that database.
+
+Each barrier produces a per-group point in time. Table scope does not claim one
+globally atomic timestamp across unrelated tables.
 
 ## Procedure
 
-1. Load configuration and require every managed connector and task to be
-   `RUNNING`.
+1. Load configuration, require every managed connector and task to be
+   `RUNNING`, and validate the target and KeeperMap engines.
 2. Join the recovery topic's single-partition consumer group. Holding its only
    partition serializes backup Jobs. Read and validate the current chain head.
 3. Choose either a new full backup or the next incremental in the current chain.
-4. Request `PAUSED` for every connector and wait until every connector and task
-   reports `PAUSED`. A paused task has completed its active `put` call.
-5. Validate the target table engines and their ClickHouse insert-deduplication
-   settings.
-6. For each pipeline, read the observational Kafka Connect offsets and the
-   authoritative KeeperMap rows. Derive the next replay offset for partition
-   `p` as:
+4. Build deterministic table or database snapshot groups. For each group:
 
-   ```text
-   KeeperMap["<input-topic>-<p>"].maxOffset + 1
-   ```
+   1. Request `PAUSED` only for connectors in that group and wait until their
+      connector and task states are `PAUSED`. A paused task has completed its
+      active `put` invocation.
+   2. Read the observational Kafka Connect offsets and authoritative KeeperMap
+      rows. The exact next replay offset for partition `p` is:
 
-   A missing row means offset zero. Reject unfinished rows, invalid partitions,
-   duplicate partitions, or a Connect offset ahead of KeeperMap.
-7. Verify that every derived offset is still between Kafka's log-start and
-   log-end offsets and that the topic partition count has not changed.
-8. Create and verify the full or incremental backup of the configured target
-   tables.
-9. Create and verify a separate full backup of every KeeperMap state table.
-   KeeperMap never uses the target-data incremental chain because its
-   append-only storage is unsafe to combine with incomplete incremental-base
-   coverage ([ClickHouse issue #112403](https://github.com/ClickHouse/ClickHouse/issues/112403)).
-10. Require every connector to remain paused and compare the live KeeperMap rows
-    with the rows captured in step 6. Any movement invalidates the candidate.
-11. Build and validate the recovery manifest, then repeat the Kafka retention
-    and partition checks from step 7.
-12. In one Kafka transaction, write the manifest keyed by the target-data backup
-    ID and replace the chain-head record. This transaction is the only success
-    boundary.
-13. Emit the committed recovery point as the Job output.
-14. Resume all connectors whether the procedure succeeded, failed, or received
-    `SIGINT`/`SIGTERM`.
+      ```text
+      KeeperMap["<input-topic>-<p>"].maxOffset + 1
+      ```
 
-## Artifacts and ownership
+      A missing row means offset zero. Reject unfinished rows, invalid or
+      duplicate partitions, and Connect offsets ahead of KeeperMap.
+   3. Verify every derived offset against Kafka's partition count and current
+      log-start/log-end offsets.
+   4. Create one copy-on-write `MergeTree` clone for each physical target table.
+      ClickHouse clones immutable parts through hard links or object-storage
+      metadata indirection; it does not copy the table's bytes during this
+      barrier ([ClickHouse table cloning](https://clickhouse.com/blog/table-cloning)).
+   5. Re-read the live KeeperMap rows and require every connector to remain
+      paused. Any state movement invalidates the snapshot.
+   6. Resume every connector in the group immediately.
 
-| Artifact | Contents | Recovery role |
-| --- | --- | --- |
-| Target-data archive | Configured MergeTree-family tables | Restores rows at the recovery point |
-| KeeperMap checkpoint | Connector processing state | Proves the exact next Kafka offset |
-| Recovery manifest | Archive identities, KeeperMap rows, exact and observed offsets | Binds data, state, and replay position |
-| Chain head | Full base, latest archive, generation, pipeline identity | Selects the next full or incremental backup |
+5. Repeat the Kafka partition and retention checks for all captured offsets.
+6. Back up only the immutable target clones to the configured S3 endpoint.
+   Snapshot tables are mapped to their original logical names in the native
+   archive, preserving incremental file identity across backup runs. The long
+   compression and object-store transfer happens while ingestion is running.
+7. Require `system.backups` to confirm the exact archive ID, destination, and
+   `BACKUP_CREATED` status.
+8. Build and validate the recovery manifest. It contains every captured
+   KeeperMap row, its Keeper path, exact replay offsets, observed Connect
+   offsets, and the target archive identity.
+9. Repeat the Kafka partition and retention checks immediately before commit.
+10. In one Kafka transaction, write the manifest keyed by the target backup ID
+    and replace the chain-head record. This is the only success boundary.
+11. Emit the committed manifest. The Job finalizer removes the temporary
+    ClickHouse clones.
 
-Archive names contain the UTC time and Kubernetes Job UID. Target-data
-incrementals point to the immediately preceding archive. Retention must delete a
-closed chain as a unit because any missing base makes later incrementals
-unrestorable.
+Connector resume is attempted after every group barrier and again when the Job
+exits successfully, fails, receives `SIGINT`, or receives `SIGTERM`.
+
+## Recovery
+
+1. Create the destination database and empty target tables with the desired
+   production engines using the normal schema tool.
+2. Restore target data into those empty tables with ClickHouse
+   `allow_different_table_def = true`. The archive contains non-replicated
+   snapshot metadata; the pre-created destination retains its intended engine.
+3. Stop every connector in the recovery manifest.
+4. Validate the manifest and prove Kafka can still serve every exact offset.
+5. Create each missing KeeperMap table with the connector's upstream schema and
+   recorded Keeper path.
+6. Rehydrate the manifest rows. Existing exact subsets are completed, making
+   interrupted recovery retryable; conflicting or extra rows are rejected.
+7. Read KeeperMap back and require exact equality with the manifest.
+8. Patch Kafka Connect offsets, read them back, and require exact equality.
+9. Resume connectors only after the recovery command succeeds.
 
 ## Failure outcomes
 
-- Failure before connector pause leaves delivery running.
-- Failure while paused creates no committed recovery point. The Job attempts to
-  resume every connector.
-- Successful archives followed by a failed catalog transaction are unreferenced
-  object-store orphans and must not be offered for recovery.
-- A committed catalog transaction means both verified archives exist and the
-  recorded offsets were replayable immediately before commit.
+- A failure before a group pauses leaves that group running.
+- A failure inside a barrier creates no recovery point and triggers connector
+  resume plus temporary-table cleanup.
+- A failure after a group resumes cannot change its immutable clone. Later live
+  inserts are deliberately outside that recovery point.
+- A completed archive followed by failed catalog publication is an unreferenced
+  object-store orphan, not a recovery point.
+- A committed catalog transaction means the target archive was verified and
+  the recorded offsets were still replayable immediately before commit.
 - `SIGKILL`, node loss, or loss of the Connect API can prevent automatic resume;
   operators must alert on failed Jobs and paused connectors.
+- Loss or unauthorized modification of the recovery catalog destroys the
+  authoritative KeeperMap checkpoint. Protect and retain that compacted topic.
 
 The protocol cannot make Kafka retention, object storage, and ClickHouse
-atomic. Restore therefore revalidates the KeeperMap checkpoint and Kafka
-watermarks before changing Kafka Connect offsets.
+atomic. Recovery therefore validates Kafka watermarks before it writes
+KeeperMap state or changes Kafka Connect offsets.
 
 ## Code map
 
-The orchestration in `backup/src/backup.rs` follows the numbered procedure:
-
 | Function | Phase |
 | --- | --- |
-| `run` | Preconditions, backup lock, chain planning, signal handling, unconditional resume |
-| `create_recovery_point` | Steps 4–13 in protocol order |
-| `pause_delivery` | Step 4 |
-| `capture_checkpoints`, `checkpoint`, and `KafkaLog::verify` | Steps 6–7 and 11 |
-| `create_archives` | Steps 8–9 |
-| `require_stable_checkpoint` | Step 10 |
-| `build_recovery_point` and `validate_recovery_point` | Step 11 |
-| `commit_recovery_point` | Step 12, the commit point |
-| `print_output` | Step 13 |
+| `run` | Preconditions, backup lock, chain planning, signal handling, final resume and cleanup |
+| `SnapshotLayout::new` | Table/database grouping and deterministic clone names |
+| `SnapshotLayout::create` | Short per-group barriers in step 4 |
+| `snapshot::capture_checkpoints` and `backup::checkpoint` | KeeperMap-to-Kafka offset derivation |
+| `ClickHouse::clone_target` | Copy-on-write immutable part snapshot |
+| `create_archives` | Long target snapshot upload after resume |
+| `build_recovery_point` and `validate_recovery_point` | Manifest construction and validation |
+| `commit_recovery_point` | Step 10, the commit point |
+| `restore::missing_keeper_rows` | Idempotent KeeperMap rehydration planning |

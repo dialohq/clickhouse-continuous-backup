@@ -97,6 +97,16 @@ impl Connect {
         }
     }
 
+    pub async fn require_paused(&self, connector: &str) -> Result<()> {
+        let status = self.status(connector).await?;
+        if status.connector.state != "PAUSED"
+            || status.tasks.iter().any(|task| task.state != "PAUSED")
+        {
+            bail!("connector moved while snapshotting: {connector}")
+        }
+        Ok(())
+    }
+
     pub async fn offsets(&self, connector: &str) -> Result<Vec<KafkaOffset>> {
         let value = self
             .request(

@@ -2,9 +2,9 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const RECOVERY_POINT_FORMAT: &str = "durable-clickhouse-sink/recovery-point-v2";
-pub const CHAIN_HEAD_FORMAT: &str = "durable-clickhouse-sink/backup-chain-v2";
-pub const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head_v2";
+pub const RECOVERY_POINT_FORMAT: &str = "durable-clickhouse-sink/recovery-point-v3";
+pub const CHAIN_HEAD_FORMAT: &str = "durable-clickhouse-sink/backup-chain-v3";
+pub const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head_v3";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -12,6 +12,7 @@ pub struct Pipeline {
     pub connector: String,
     pub database: String,
     pub state_table: String,
+    pub keeper_path: String,
     pub table: String,
     pub topic: String,
     pub partitions: u32,
@@ -41,6 +42,19 @@ impl Pipeline {
             {
                 bail!("pipeline {name} must be a ClickHouse identifier")
             }
+        }
+        if !self.keeper_path.starts_with('/')
+            || !self
+                .keeper_path
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "_/-".contains(character))
+            || self
+                .keeper_path
+                .split('/')
+                .skip(1)
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            bail!("pipeline keeper_path must be an absolute safe Keeper path")
         }
         Ok(())
     }
@@ -96,6 +110,7 @@ pub struct KeeperRow {
 pub struct KeeperCheckpoint {
     pub database: String,
     pub table: String,
+    pub path: String,
     pub rows: Vec<KeeperRow>,
 }
 
@@ -142,7 +157,6 @@ pub struct RecoveryPoint {
     pub format: String,
     pub created_at: String,
     pub backup: BackupReference,
-    pub checkpoint_backup: BackupDependency,
     pub connectors: Vec<ConnectorCheckpoint>,
 }
 
@@ -172,6 +186,5 @@ pub struct BackupDetails {
 pub struct BackupOutput<'a> {
     #[serde(flatten)]
     pub details: &'a BackupDetails,
-    pub checkpoint_details: &'a BackupDetails,
     pub recovery_point: &'a RecoveryPoint,
 }

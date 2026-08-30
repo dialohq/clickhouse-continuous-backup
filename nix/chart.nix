@@ -85,6 +85,8 @@ let
         pathPrefix: durable-clickhouse-sink
         archiveExtension: tar.zst
         maxIncrementalsPerFull: 0
+        maxBandwidthBytesPerSecond: 0
+        snapshotScope: table
         pauseTimeoutSeconds: 120
         activeDeadlineSeconds: 21600
         terminationGracePeriodSeconds: 300
@@ -200,6 +202,8 @@ let
             pathPrefix = {type = "string"; pattern = "^[A-Za-z0-9_./-]+$";};
             archiveExtension = {type = "string"; enum = ["tar.zst" "tar.gz" "tar.xz" "tar.bz2" "tgz" "tzst"];};
             maxIncrementalsPerFull = {type = "integer"; minimum = 0; maximum = 9999;};
+            maxBandwidthBytesPerSecond = {type = "integer"; minimum = 0;};
+            snapshotScope = {type = "string"; enum = ["table" "database"];};
             pauseTimeoutSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             activeDeadlineSeconds = {type = "integer"; minimum = 1; maximum = 604800;};
             terminationGracePeriodSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
@@ -263,29 +267,6 @@ let
       {{- printf "durable_sink_%s_%s_state" $root.Values.stateNamespace $pipeline.name | replace "-" "_" | trunc 127 -}}
       {{- end }}
 
-      {{- define "durable-clickhouse-sink.backupObjects" -}}
-      {{- $tables := dict -}}
-      {{- range $pipeline := .Values.pipelines -}}
-      {{- $database := default $.Values.clickhouse.database $pipeline.database -}}
-      {{- $_ := set $tables (printf "%s.%s" $database $pipeline.table) (dict "database" $database "table" $pipeline.table) -}}
-      {{- end -}}
-      {{- $first := true -}}
-      {{- range $key, $target := $tables -}}
-      {{- if not $first }}, {{ end -}}
-      TABLE {{ $target.database }}.{{ $target.table }}
-      {{- $first = false -}}
-      {{- end -}}
-      {{- end }}
-
-      {{- define "durable-clickhouse-sink.backupStateObjects" -}}
-      {{- $first := true -}}
-      {{- range $pipeline := .Values.pipelines -}}
-      {{- if not $first }}, {{ end -}}
-      TABLE {{ default $.Values.clickhouse.database $pipeline.database }}.{{ include "durable-clickhouse-sink.stateTable" (list $ $pipeline) }}
-      {{- $first = false -}}
-      {{- end -}}
-      {{- end }}
-
       {{- define "durable-clickhouse-sink.backupPipelines" -}}
       {{- $pipelines := list -}}
       {{- range $pipeline := .Values.pipelines -}}
@@ -293,6 +274,7 @@ let
         "connector" (include "durable-clickhouse-sink.pipelineName" (list $ $pipeline))
         "database" (default $.Values.clickhouse.database $pipeline.database)
         "state_table" (include "durable-clickhouse-sink.stateTable" (list $ $pipeline))
+        "keeper_path" (printf "/durable-clickhouse-sink/%s/%s" $.Values.stateNamespace $pipeline.name)
         "table" $pipeline.table
         "topic" $pipeline.topic
         "partitions" (default $.Values.topics.partitions $pipeline.partitions)) -}}
@@ -819,16 +801,14 @@ let
                         value: http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083
                       - name: CLICKHOUSE_URL
                         value: {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }}
-                      - name: BACKUP_OBJECTS
-                        value: {{ include "durable-clickhouse-sink.backupObjects" . | trim | quote }}
-                      - name: BACKUP_STATE_OBJECTS
-                        value: {{ include "durable-clickhouse-sink.backupStateObjects" . | trim | quote }}
                       - name: BACKUP_PIPELINES
                         value: {{ include "durable-clickhouse-sink.backupPipelines" . | quote }}
                       - {name: BACKUP_NAMED_COLLECTION, value: {{ .Values.backup.namedCollection | quote }}}
                       - {name: BACKUP_PATH_PREFIX, value: {{ trimSuffix "/" .Values.backup.pathPrefix | quote }}}
                       - {name: BACKUP_ARCHIVE_EXTENSION, value: {{ .Values.backup.archiveExtension | quote }}}
                       - {name: MAX_INCREMENTALS_PER_FULL, value: {{ .Values.backup.maxIncrementalsPerFull | quote }}}
+                      - {name: MAX_BACKUP_BANDWIDTH, value: {{ .Values.backup.maxBandwidthBytesPerSecond | quote }}}
+                      - {name: SNAPSHOT_SCOPE, value: {{ .Values.backup.snapshotScope | quote }}}
                       - {name: PAUSE_TIMEOUT_SECONDS, value: {{ .Values.backup.pauseTimeoutSeconds | quote }}}
                       - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
                       - {name: KAFKA_RECOVERY_TOPIC, value: {{ include "durable-clickhouse-sink.recoveryTopic" . | quote }}}

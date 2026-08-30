@@ -55,8 +55,6 @@ pub struct BackupConfig {
     pub clickhouse_url: String,
     pub clickhouse_username: String,
     pub clickhouse_password: String,
-    pub backup_objects: String,
-    pub backup_state_objects: String,
     pub named_collection: String,
     pub path_prefix: String,
     pub archive_extension: String,
@@ -66,8 +64,16 @@ pub struct BackupConfig {
     pub kafka_properties_file: Option<PathBuf>,
     pub recovery_topic: String,
     pub max_incrementals_per_full: u32,
+    pub max_backup_bandwidth: u64,
+    pub snapshot_scope: SnapshotScope,
     pub pipelines: Vec<Pipeline>,
     pub timeouts: RuntimeTimeouts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotScope {
+    Table,
+    Database,
 }
 
 #[derive(Clone, Debug)]
@@ -144,8 +150,6 @@ impl BackupConfig {
             clickhouse_url: required("CLICKHOUSE_URL")?,
             clickhouse_username: required("CLICKHOUSE_USERNAME")?,
             clickhouse_password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
-            backup_objects: required("BACKUP_OBJECTS")?,
-            backup_state_objects: required("BACKUP_STATE_OBJECTS")?,
             named_collection,
             path_prefix,
             archive_extension,
@@ -155,6 +159,12 @@ impl BackupConfig {
             kafka_properties_file: optional("KAFKA_PROPERTIES_FILE").map(PathBuf::from),
             recovery_topic: required("KAFKA_RECOVERY_TOPIC")?,
             max_incrementals_per_full: unsigned("MAX_INCREMENTALS_PER_FULL")?,
+            max_backup_bandwidth: unsigned64("MAX_BACKUP_BANDWIDTH")?,
+            snapshot_scope: match required("SNAPSHOT_SCOPE")?.as_str() {
+                "table" => SnapshotScope::Table,
+                "database" => SnapshotScope::Database,
+                _ => bail!("SNAPSHOT_SCOPE must be table or database"),
+            },
             pipelines,
             timeouts: RuntimeTimeouts::from_environment()?,
         })
@@ -278,6 +288,12 @@ fn seconds(name: &str) -> Result<Duration> {
 }
 
 fn unsigned(name: &str) -> Result<u32> {
+    required(name)?
+        .parse()
+        .with_context(|| format!("{name} must be a non-negative integer"))
+}
+
+fn unsigned64(name: &str) -> Result<u64> {
     required(name)?
         .parse()
         .with_context(|| format!("{name} must be a non-negative integer"))

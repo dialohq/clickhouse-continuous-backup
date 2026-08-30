@@ -8,12 +8,12 @@ state in a ClickHouse `KeeperMap` table. An uncertain insert is retried as the
 same ClickHouse block, allowing ClickHouse insert-block deduplication to remove
 the transport retry.
 
-At a recovery point, connectors are drained and paused. The manifest derives
-the next Kafka offset from the backed-up KeeperMap `maxOffset + 1`, not from a
-potentially lagging Kafka Connect commit. Target data and a full KeeperMap
-checkpoint are backed up separately. Recovery verifies the restored KeeperMap
-against the manifest before patching Connect and verifies Connect's read-back
-before it may be resumed.
+At a recovery point, connectors are drained and paused only while ClickHouse
+creates copy-on-write target clones and the Job captures stable KeeperMap rows.
+Ingestion resumes before compression or object-store upload. The manifest
+derives the next Kafka offset from KeeperMap `maxOffset + 1`, not from a
+potentially lagging Kafka Connect commit. Recovery rehydrates KeeperMap from
+the manifest before patching Connect and verifies both read-backs.
 
 This is an exactly-once delivery boundary for Kafka records, not a distributed
 transaction from a producer's local storage through ClickHouse.

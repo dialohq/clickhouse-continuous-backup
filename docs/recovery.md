@@ -33,13 +33,16 @@ Preserve the Helm release name, `stateNamespace`, pipeline and connector names,
 input topic names and partition counts, target database/table names,
 KeeperMap table names, and Kafka Connect internal-topic identities.
 
-Restore into an empty ClickHouse database backed by an isolated Keeper:
+Restore into a clean ClickHouse database backed by an isolated Keeper:
 
 1. Retrieve the chosen recovery manifest by its target-data backup ID from the
    recovery topic.
-2. Restore the manifest's `backup.name`. ClickHouse follows its incremental
-   dependencies automatically.
-3. Restore `checkpoint_backup.name` into the same database and table names.
+2. Create the empty target tables with the desired production engines through
+   the normal schema tool.
+3. Restore the manifest's `backup.name` into those empty tables with
+   `allow_different_table_def = true`. ClickHouse follows incremental
+   dependencies automatically. The archive contains non-replicated snapshot
+   metadata while the destination may use another compatible MergeTree engine.
 4. Stop every managed connector with `PUT /connectors/<name>/stop` and wait for
    `STOPPED`.
 5. Run `/bin/durable-clickhouse-recovery restore-offsets` with the manifest on
@@ -56,22 +59,24 @@ The recovery command requires `CONNECT_URL`, `CLICKHOUSE_URL`,
 `EXPECTED_BACKUP_NAME`, `RECOVERY_MANIFEST_FILE`, and
 `STOP_TIMEOUT_SECONDS`, plus `KAFKA_BOOTSTRAP_SERVERS` and optional
 `KAFKA_PROPERTIES_FILE`. `RUNTIME_TIMEOUTS` must contain the JSON value rendered
-by the chart's `timeouts` settings. Before it touches Kafka Connect, it reads
-every restored KeeperMap table, requires exact logical equality with the
-manifest, and proves that every exact replay offset remains in Kafka.
-It then patches the exact derived offsets through Kafka Connect's standard
-offset API and reads them back for equality. It never resumes a connector. A
-partial API failure leaves all connectors stopped and is safe to retry.
+by the chart's `timeouts` settings. Before it touches Kafka Connect offsets, it
+proves every exact replay offset remains in Kafka, creates missing KeeperMap
+tables, and rehydrates the manifest rows. Existing exact subsets are completed;
+conflicting or extra rows are rejected. It reads KeeperMap back for exact
+equality, patches offsets through Kafka Connect's standard API, and verifies
+their read-back. It never resumes a connector. Partial work is idempotent and
+safe to retry while connectors remain stopped.
 
-This ordering closes the dangerous cases: restoring data without its KeeperMap
-checkpoint cannot rewind Kafka, and restoring the checkpoint while selecting a
-different target-data archive is rejected by `EXPECTED_BACKUP_NAME`.
+`EXPECTED_BACKUP_NAME` binds the manifest to the selected target-data archive.
+The recovery topic is the authoritative KeeperMap checkpoint and must be
+protected and retained accordingly.
 
 ## Drill acceptance criteria
 
 A restore drill is successful only when:
 
-- the target-data backup and independent KeeperMap checkpoint both restore;
+- the target-data backup restores into the intended production table engines;
+- KeeperMap is reconstructed exactly from the selected recovery manifest;
 - restored row counts and content-level aggregates match the recovery point;
 - the recovery command proves restored KeeperMap equality and exact Connect
   offset read-back;

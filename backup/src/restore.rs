@@ -51,13 +51,33 @@ pub async fn run() -> Result<()> {
         config.clickhouse_password,
         &config.timeouts,
     )?;
+    kafka.verify(&point.connectors)?;
+
+    let mut missing = Vec::with_capacity(point.connectors.len());
+    for checkpoint in &point.connectors {
+        clickhouse
+            .ensure_keeper_table(
+                &checkpoint.keeper.database,
+                &checkpoint.keeper.table,
+                &checkpoint.keeper.path,
+            )
+            .await?;
+        let actual = clickhouse
+            .keeper_rows(&checkpoint.keeper.database, &checkpoint.keeper.table)
+            .await?;
+        missing.push(missing_keeper_rows(checkpoint, actual)?);
+    }
+    for (checkpoint, rows) in point.connectors.iter().zip(&missing) {
+        clickhouse
+            .insert_keeper_rows(&checkpoint.keeper.database, &checkpoint.keeper.table, rows)
+            .await?;
+    }
     for checkpoint in &point.connectors {
         let actual = clickhouse
             .keeper_rows(&checkpoint.keeper.database, &checkpoint.keeper.table)
             .await?;
         require_keeper_match(checkpoint, actual)?;
     }
-    kafka.verify(&point.connectors)?;
 
     for connector in &config.connector_names {
         connect
@@ -113,6 +133,32 @@ fn require_keeper_match(
     Ok(())
 }
 
+fn missing_keeper_rows(
+    checkpoint: &ConnectorCheckpoint,
+    actual: Vec<KeeperRow>,
+) -> Result<Vec<KeeperRow>> {
+    for row in &actual {
+        if !checkpoint
+            .keeper
+            .rows
+            .iter()
+            .any(|expected| expected == row)
+        {
+            bail!(
+                "existing ClickHouse KeeperMap is not a subset of the recovery point: {}",
+                checkpoint.name
+            )
+        }
+    }
+    Ok(checkpoint
+        .keeper
+        .rows
+        .iter()
+        .filter(|expected| !actual.contains(expected))
+        .cloned()
+        .collect())
+}
+
 fn read_manifest(path: &str) -> Result<String> {
     if path == "-" {
         let mut manifest = String::new();
@@ -128,7 +174,7 @@ fn read_manifest(path: &str) -> Result<String> {
 mod tests {
     use crate::model::{ConnectorCheckpoint, KeeperCheckpoint, KeeperRow};
 
-    use super::require_keeper_match;
+    use super::{missing_keeper_rows, require_keeper_match};
 
     fn row(key: &str, max_offset: u64) -> KeeperRow {
         KeeperRow {
@@ -149,6 +195,7 @@ mod tests {
             keeper: KeeperCheckpoint {
                 database: "records".to_owned(),
                 table: "records_state".to_owned(),
+                path: "/durable-clickhouse-sink/default/records".to_owned(),
                 rows: vec![row("records.input-0", 10), row("records.input-1", 20)],
             },
         }
@@ -170,6 +217,25 @@ mod tests {
                 vec![row("records.input-0", 10), row("records.input-1", 19)]
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn keeper_rehydration_is_idempotent_and_repairs_exact_subsets() {
+        let point = checkpoint();
+        assert_eq!(
+            missing_keeper_rows(&point, vec![]).unwrap(),
+            point.keeper.rows
+        );
+        assert_eq!(
+            missing_keeper_rows(&point, vec![row("records.input-0", 10)]).unwrap(),
+            vec![row("records.input-1", 20)]
+        );
+        assert!(missing_keeper_rows(&point, vec![row("records.input-0", 11)]).is_err());
+        assert!(
+            missing_keeper_rows(&point, point.keeper.rows.clone())
+                .unwrap()
+                .is_empty()
         );
     }
 }

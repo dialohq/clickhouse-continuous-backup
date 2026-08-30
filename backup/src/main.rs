@@ -7,6 +7,7 @@ mod kafka;
 mod model;
 mod preflight;
 mod restore;
+mod snapshot;
 
 use anyhow::{Context, Result, bail};
 

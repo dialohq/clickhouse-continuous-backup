@@ -69,10 +69,20 @@ impl ClickHouse {
         objects: &str,
         destination: &str,
         base: Option<&str>,
+        max_bandwidth: u64,
     ) -> Result<(uuid::Uuid, String)> {
-        let settings = base.map_or(String::new(), |base| {
-            format!(" SETTINGS base_backup = {base}")
-        });
+        let mut settings = Vec::new();
+        if let Some(base) = base {
+            settings.push(format!("base_backup = {base}"));
+        }
+        if max_bandwidth > 0 {
+            settings.push(format!("max_backup_bandwidth = {max_bandwidth}"));
+        }
+        let settings = if settings.is_empty() {
+            String::new()
+        } else {
+            format!(" SETTINGS {}", settings.join(", "))
+        };
         let response = self
             .query(&format!("BACKUP {objects} TO {destination}{settings}"))
             .await?;
@@ -111,6 +121,65 @@ impl ClickHouse {
             "SELECT key, minOffset, maxOffset, state FROM `{database}`.`{table}` FORMAT JSONEachRow"
         ))
         .await
+    }
+
+    pub async fn clone_target(&self, database: &str, source: &str, snapshot: &str) -> Result<()> {
+        self.query(&format!(
+            "CREATE TABLE `{database}`.`{snapshot}` ENGINE = MergeTree CLONE AS `{database}`.`{source}`"
+        ))
+        .await?;
+        Ok(())
+    }
+
+    pub async fn drop_table(&self, database: &str, table: &str) -> Result<()> {
+        self.query(&format!("DROP TABLE IF EXISTS `{database}`.`{table}` SYNC"))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn ensure_keeper_table(&self, database: &str, table: &str, path: &str) -> Result<()> {
+        let existing: Vec<TableEngine> = self
+            .json_each_row(&format!(
+                "SELECT database, name, engine, create_table_query FROM system.tables WHERE database = '{database}' AND name = '{table}' FORMAT JSONEachRow"
+            ))
+            .await?;
+        match existing.as_slice() {
+            [] => {
+                self.query(&format!(
+                    "CREATE TABLE `{database}`.`{table}` (`key` String, `minOffset` Int64, `maxOffset` Int64, `state` String) ENGINE = KeeperMap('{path}') PRIMARY KEY `key`"
+                ))
+                .await?;
+            }
+            [existing]
+                if existing.engine == "KeeperMap"
+                    && existing
+                        .create_table_query
+                        .contains(&format!("KeeperMap('{path}')")) => {}
+            [existing] => bail!(
+                "recovery state table has an incompatible engine or Keeper path: {database}.{table} ({})",
+                existing.engine
+            ),
+            _ => bail!("ClickHouse returned duplicate state tables: {database}.{table}"),
+        }
+        Ok(())
+    }
+
+    pub async fn insert_keeper_rows(
+        &self,
+        database: &str,
+        table: &str,
+        rows: &[KeeperRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut query = format!("INSERT INTO `{database}`.`{table}` FORMAT JSONEachRow\n");
+        for row in rows {
+            query.push_str(&serde_json::to_string(row)?);
+            query.push('\n');
+        }
+        self.query(&query).await?;
+        Ok(())
     }
 
     pub async fn require_backup_engines(&self, pipelines: &[Pipeline]) -> Result<()> {
@@ -246,6 +315,7 @@ mod tests {
             connector: "records".to_owned(),
             database: "history".to_owned(),
             state_table: "records_state".to_owned(),
+            keeper_path: "/durable-clickhouse-sink/default/records".to_owned(),
             table: "records".to_owned(),
             topic: "records.input".to_owned(),
             partitions: 3,

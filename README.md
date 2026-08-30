@@ -69,6 +69,8 @@ backup:
   namedCollection: durable_clickhouse_backups
   pathPrefix: durable-data/production
   maxIncrementalsPerFull: 6
+  snapshotScope: table
+  maxBandwidthBytesPerSecond: 0
   credentialsSecret:
     name: durable-clickhouse-backup
     usernameKey: username
@@ -79,12 +81,12 @@ Network, Kafka, polling, hook, and backup deadlines have chart defaults under
 `timeouts` and `backup`. Override them for the deployment's latency and backup
 size; the recovery binary does not carry fallback durations of its own.
 
-Each backup Job verifies the connector tasks, pauses and drains them, snapshots
-their KeeperMap state, creates and verifies a direct S3 backup, and publishes a
-recovery-point manifest to a compacted Kafka topic. Target tables use one full
-backup followed by at most `maxIncrementalsPerFull` incremental backups. Every
-point also contains an independent full KeeperMap checkpoint. The safe default
-is `0`, which creates only full backups.
+Each backup Job briefly pauses the connectors for one table or database group,
+creates copy-on-write target-table clones, captures and verifies KeeperMap
+state, and resumes that group. Compression and S3 upload operate on the
+immutable clones while ingestion is running. The manifest stores the exact
+KeeperMap rows and Kafka offsets. Target tables use one full backup followed by
+at most `maxIncrementalsPerFull` incrementals; `0` is the full-only default.
 
 The immutable `stateNamespace`, release name, pipeline names, topic names, and
 Kafka Connect internal topics are recovery identities. Do not rename them as a

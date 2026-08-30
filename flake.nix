@@ -70,6 +70,7 @@
           namedCollection = "durable_backups";
           pathPrefix = "durable-e2e";
           maxIncrementalsPerFull = 2;
+          maxBandwidthBytesPerSecond = 262144;
           credentialsSecret.name = "clickhouse-credentials";
         };
         pipelines = [{
@@ -148,6 +149,8 @@
         grep -F 'BACKUP_NAMED_COLLECTION' rendered.yaml >/dev/null
         grep -F 'BACKUP_PIPELINES' rendered.yaml >/dev/null
         grep -F 'MAX_INCREMENTALS_PER_FULL' rendered.yaml >/dev/null
+        grep -F 'MAX_BACKUP_BANDWIDTH' rendered.yaml >/dev/null
+        grep -F 'SNAPSHOT_SCOPE' rendered.yaml >/dev/null
         grep -F 'KAFKA_RECOVERY_TOPIC' rendered.yaml >/dev/null
         grep -F 'RUNTIME_TIMEOUTS' rendered.yaml >/dev/null
         grep -F 'activeDeadlineSeconds: 21600' rendered.yaml >/dev/null
@@ -156,7 +159,6 @@
         grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F '.recovery-points' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
-        [[ $(grep -c 'value: "TABLE default.records"' rendered-shared-table.yaml) == 1 ]]
         touch $out
       '';
     });

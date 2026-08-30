@@ -22,9 +22,9 @@ Each connector uses a stable Keeper path and state table derived from
 durable_sink_<stateNamespace>_<pipeline>_state
 ```
 
-The state table is created in the target database. Every recovery point stores
-it in an independent full checkpoint; it is never part of the incremental
-target-table chain.
+The state table is created in the target database. Every recovery manifest
+stores its complete rows and Keeper path. Recovery recreates an empty KeeperMap
+and rehydrates those rows before changing Kafka Connect offsets.
 
 ## Why the target is not ReplacingMergeTree
 
@@ -44,7 +44,7 @@ separate rows.
 | --- | --- | --- |
 | Connect dies before ClickHouse acknowledgement | input topic and KeeperMap | deterministic block retry |
 | Connect dies after insert but before offset commit | KeeperMap and ClickHouse block hash | inserted block is not duplicated |
-| ClickHouse data loss | target-table backup, full KeeperMap checkpoint, recovery manifest, and retained input log | verified exact-offset tail replay |
+| ClickHouse data loss | target-table backup, recovery manifest, and retained input log | KeeperMap rehydration and verified exact-offset tail replay |
 
 ## Boundaries
 

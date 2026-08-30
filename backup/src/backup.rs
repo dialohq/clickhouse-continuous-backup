@@ -16,6 +16,7 @@ use crate::{
         KafkaOffsetValue, KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline,
         RECOVERY_POINT_FORMAT, RecoveryPoint, kafka_name,
     },
+    snapshot::SnapshotLayout,
 };
 
 struct BackupPlan {
@@ -31,8 +32,6 @@ struct BackupPlan {
 struct CreatedArchives {
     target: BackupReference,
     target_details: BackupDetails,
-    checkpoint: BackupDependency,
-    checkpoint_details: BackupDetails,
 }
 
 pub async fn run() -> Result<()> {
@@ -67,7 +66,18 @@ pub async fn run() -> Result<()> {
         &config.pipelines,
     );
 
-    let operation = create_recovery_point(&config, &connect, &catalog, &plan);
+    let clickhouse = ClickHouse::new(
+        config.clickhouse_url.clone(),
+        config.clickhouse_username.clone(),
+        config.clickhouse_password.clone(),
+        &config.timeouts,
+    )?;
+    clickhouse.require_backup_engines(&config.pipelines).await?;
+    let snapshots = SnapshotLayout::new(&config.run_id, config.snapshot_scope, &config.pipelines);
+    snapshots.cleanup(&clickhouse).await?;
+
+    let operation =
+        create_recovery_point(&config, &connect, &clickhouse, &catalog, &plan, &snapshots);
     tokio::pin!(operation);
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -77,6 +87,9 @@ pub async fn run() -> Result<()> {
         _ = terminate.recv() => Err(anyhow::anyhow!("backup terminated")),
     };
     let resume = resume_all(&connect, &connectors).await;
+    if let Err(error) = snapshots.cleanup(&clickhouse).await {
+        eprintln!("failed to remove ClickHouse snapshot tables: {error:#}");
+    }
     match (result, resume) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(operation), Ok(())) => Err(operation),
@@ -88,27 +101,22 @@ pub async fn run() -> Result<()> {
 async fn create_recovery_point(
     config: &BackupConfig,
     connect: &Connect,
+    clickhouse: &ClickHouse,
     catalog: &Catalog,
     plan: &BackupPlan,
+    snapshots: &SnapshotLayout,
 ) -> Result<()> {
-    pause_delivery(config, connect).await?;
-    let clickhouse = ClickHouse::new(
-        config.clickhouse_url.clone(),
-        config.clickhouse_username.clone(),
-        config.clickhouse_password.clone(),
-        &config.timeouts,
-    )?;
-    clickhouse.require_backup_engines(&config.pipelines).await?;
     let kafka = KafkaLog::new(
         &config.kafka_bootstrap_servers,
         &config.kafka_properties()?,
         &config.timeouts,
     )?;
 
-    let checkpoints = capture_checkpoints(config, connect, &clickhouse).await?;
+    let checkpoints = snapshots
+        .create(config, connect, clickhouse, &kafka)
+        .await?;
     kafka.verify(&checkpoints)?;
-    let archives = create_archives(config, &clickhouse, plan).await?;
-    require_stable_checkpoint(config, connect, &clickhouse, &checkpoints).await?;
+    let archives = create_archives(config, clickhouse, plan, snapshots).await?;
 
     let recovery_point = build_recovery_point(&archives, checkpoints);
     validate_recovery_point(&recovery_point)?;
@@ -118,38 +126,11 @@ async fn create_recovery_point(
     Ok(())
 }
 
-async fn pause_delivery(config: &BackupConfig, connect: &Connect) -> Result<()> {
-    for pipeline in &config.pipelines {
-        connect.pause(&pipeline.connector).await?;
-    }
-    for pipeline in &config.pipelines {
-        connect
-            .wait_paused(&pipeline.connector, config.pause_timeout)
-            .await?;
-    }
-    Ok(())
-}
-
-async fn capture_checkpoints(
-    config: &BackupConfig,
-    connect: &Connect,
-    clickhouse: &ClickHouse,
-) -> Result<Vec<ConnectorCheckpoint>> {
-    let mut checkpoints = Vec::with_capacity(config.pipelines.len());
-    for pipeline in &config.pipelines {
-        let observed = connect.offsets(&pipeline.connector).await?;
-        let rows = clickhouse
-            .keeper_rows(&pipeline.database, &pipeline.state_table)
-            .await?;
-        checkpoints.push(checkpoint(pipeline, observed, rows)?);
-    }
-    Ok(checkpoints)
-}
-
 async fn create_archives(
     config: &BackupConfig,
     clickhouse: &ClickHouse,
     plan: &BackupPlan,
+    snapshots: &SnapshotLayout,
 ) -> Result<CreatedArchives> {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let target_path = match plan.kind {
@@ -168,31 +149,17 @@ async fn create_archives(
         ),
     };
     let target_destination = format!("S3({}, '{}')", config.named_collection, target_path);
+    let target_objects = snapshots.backup_objects();
     let (target_id, _) = clickhouse
         .create_backup(
-            &config.backup_objects,
+            &target_objects,
             &target_destination,
             plan.base.as_ref().map(|backup| backup.name.as_str()),
+            config.max_backup_bandwidth,
         )
         .await?;
     let target_details = clickhouse
         .backup_details(target_id, &target_destination)
-        .await?;
-    let checkpoint_path = format!(
-        "{}/chains/{}/checkpoint-{:04}-{}-{}.{}",
-        config.path_prefix,
-        plan.chain_id,
-        plan.position,
-        stamp,
-        config.run_id,
-        config.archive_extension
-    );
-    let checkpoint_destination = format!("S3({}, '{}')", config.named_collection, checkpoint_path);
-    let (checkpoint_id, _) = clickhouse
-        .create_backup(&config.backup_state_objects, &checkpoint_destination, None)
-        .await?;
-    let checkpoint_details = clickhouse
-        .backup_details(checkpoint_id, &checkpoint_destination)
         .await?;
     Ok(CreatedArchives {
         target: BackupReference {
@@ -207,30 +174,7 @@ async fn create_archives(
             }),
         },
         target_details,
-        checkpoint: BackupDependency {
-            id: checkpoint_id,
-            name: checkpoint_destination,
-        },
-        checkpoint_details,
     })
-}
-
-async fn require_stable_checkpoint(
-    config: &BackupConfig,
-    connect: &Connect,
-    clickhouse: &ClickHouse,
-    checkpoints: &[ConnectorCheckpoint],
-) -> Result<()> {
-    for (pipeline, checkpoint) in config.pipelines.iter().zip(checkpoints) {
-        connect
-            .wait_paused(&pipeline.connector, config.pause_timeout)
-            .await?;
-        let current = clickhouse
-            .keeper_rows(&pipeline.database, &pipeline.state_table)
-            .await?;
-        require_unchanged_keeper(checkpoint, current)?;
-    }
-    Ok(())
 }
 
 fn build_recovery_point(
@@ -241,7 +185,6 @@ fn build_recovery_point(
         format: RECOVERY_POINT_FORMAT.to_owned(),
         created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         backup: archives.target.clone(),
-        checkpoint_backup: archives.checkpoint.clone(),
         connectors,
     }
 }
@@ -267,14 +210,13 @@ fn print_output(archives: &CreatedArchives, recovery_point: &RecoveryPoint) -> R
         "{}",
         serde_json::to_string(&BackupOutput {
             details: &archives.target_details,
-            checkpoint_details: &archives.checkpoint_details,
             recovery_point
         })?
     );
     Ok(())
 }
 
-fn require_unchanged_keeper(
+pub(crate) fn require_unchanged_keeper(
     checkpoint: &ConnectorCheckpoint,
     mut current: Vec<KeeperRow>,
 ) -> Result<()> {
@@ -331,7 +273,7 @@ fn next_head(plan: &BackupPlan, backup: BackupReference) -> ChainHead {
     }
 }
 
-fn checkpoint(
+pub(crate) fn checkpoint(
     pipeline: &Pipeline,
     observed: Vec<KafkaOffset>,
     rows: Vec<KeeperRow>,
@@ -343,6 +285,9 @@ fn checkpoint(
     }
     if rows.iter().any(|row| row.min_offset > row.max_offset) {
         bail!("KeeperMap state contains an invalid offset range")
+    }
+    if rows.iter().any(|row| row.max_offset > i64::MAX as u64) {
+        bail!("KeeperMap state exceeds the connector's signed offset range")
     }
     let relevant = rows
         .iter()
@@ -419,6 +364,7 @@ fn checkpoint(
         keeper: KeeperCheckpoint {
             database: pipeline.database.clone(),
             table: pipeline.state_table.clone(),
+            path: pipeline.keeper_path.clone(),
             rows,
         },
     })
@@ -475,8 +421,6 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
             .base
             .as_ref()
             .is_some_and(|base| !backup_destination(&base.name))
-        || !backup_destination(&point.checkpoint_backup.name)
-        || point.checkpoint_backup.id == backup.id
         || !valid_backup
     {
         bail!("invalid recovery-point manifest")
@@ -506,11 +450,12 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
             || connector.offsets.len() != connector.partitions as usize
             || !clickhouse_identifier(&connector.keeper.database)
             || !clickhouse_identifier(&connector.keeper.table)
-            || connector
-                .keeper
-                .rows
-                .iter()
-                .any(|row| row.state != "AFTER_PROCESSING" || row.min_offset > row.max_offset)
+            || !safe_keeper_path(&connector.keeper.path)
+            || connector.keeper.rows.iter().any(|row| {
+                row.state != "AFTER_PROCESSING"
+                    || row.min_offset > row.max_offset
+                    || row.max_offset > i64::MAX as u64
+            })
             || connector.observed_connect_offsets.iter().any(|offset| {
                 offset.partition.kafka_topic != connector.topic
                     || offset.partition.kafka_partition >= connector.partitions
@@ -583,6 +528,17 @@ fn safe_chain_id(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
+fn safe_keeper_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_/-".contains(character))
+        && value
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 fn backup_destination(value: &str) -> bool {
     let Some((collection, path)) = value
         .strip_prefix("S3(")
@@ -601,7 +557,7 @@ fn backup_destination(value: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
-async fn resume_all(connect: &Connect, connectors: &[&str]) -> Result<()> {
+pub(crate) async fn resume_all(connect: &Connect, connectors: &[&str]) -> Result<()> {
     let mut failures = Vec::new();
     for connector in connectors {
         if let Err(error) = connect.resume(connector).await {
@@ -667,6 +623,7 @@ mod tests {
             connector: "records".to_owned(),
             database: "records".to_owned(),
             state_table: "records_state".to_owned(),
+            keeper_path: "/durable-clickhouse-sink/default/records".to_owned(),
             table: "records".to_owned(),
             topic: "records.input".to_owned(),
             partitions: 3,
@@ -898,10 +855,6 @@ mod tests {
             format: RECOVERY_POINT_FORMAT.to_owned(),
             created_at: "2026-08-30T12:00:00Z".to_owned(),
             backup: reference(BackupKind::Full, 0),
-            checkpoint_backup: BackupDependency {
-                id: Uuid::from_u128(999),
-                name: "S3(backups, 'root/chains/chain/checkpoint.tar.zst')".to_owned(),
-            },
             connectors: vec![ConnectorCheckpoint {
                 name: "records".to_owned(),
                 topic: "records.input".to_owned(),
@@ -911,6 +864,7 @@ mod tests {
                 keeper: KeeperCheckpoint {
                     database: "records".to_owned(),
                     table: "records_state".to_owned(),
+                    path: "/durable-clickhouse-sink/default/records".to_owned(),
                     rows: vec![row(0, 9, "AFTER_PROCESSING")],
                 },
             }],
@@ -1006,11 +960,7 @@ mod tests {
         assert!(validate_recovery_point(&point).is_err());
 
         point = recovery_point();
-        point.checkpoint_backup.name = "S3(backups, 'root/../checkpoint.tar.zst')".to_owned();
-        assert!(validate_recovery_point(&point).is_err());
-
-        point = recovery_point();
-        point.checkpoint_backup.id = point.backup.id;
+        point.connectors[0].keeper.path = "/durable-clickhouse-sink/../records".to_owned();
         assert!(validate_recovery_point(&point).is_err());
 
         point = recovery_point();
