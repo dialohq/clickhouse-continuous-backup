@@ -166,17 +166,17 @@ pub async fn lookup(
         .create()?;
     let metadata = consumer.fetch_metadata(Some(topic), timeouts.kafka_metadata)?;
     let [metadata] = metadata.topics() else {
-        bail!("Kafka did not return exactly one recovery topic")
+        bail!("Kafka did not return exactly one backup catalog topic")
     };
     if let Some(error) = metadata.error() {
-        bail!("Kafka recovery-topic metadata failed: {error:?}")
+        bail!("Kafka backup-catalog metadata failed: {error:?}")
     }
     if metadata.partitions().len() != 1 {
-        bail!("the recovery topic must have exactly one partition")
+        bail!("the backup catalog topic must have exactly one partition")
     }
     let (low, high) = consumer.fetch_watermarks(topic, 0, timeouts.kafka_metadata)?;
     if low < 0 || high < low {
-        bail!("Kafka returned invalid recovery-topic watermarks: {low}..{high}")
+        bail!("Kafka returned invalid backup-catalog watermarks: {low}..{high}")
     }
     if low == high {
         return Ok(None);

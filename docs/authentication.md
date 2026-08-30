@@ -34,12 +34,12 @@ The Kafka principal needs read access to configured input topics and access to
 the Connect internal and consumer-offset resources it owns. The backup Job
 needs read/write access to the backup catalog topic, transactional-ID access
 for its manifest transaction, and consumer-group access to the topic-derived
-`<backup-catalog-topic>.backup-lock` group. The recovery controller needs read access
-to source topics, read/write/create access to its UID-derived replay topics,
+`<backup-catalog-topic>.backup-lock` group. The recovery controller needs read
+access to the backup catalog and source topics, read/write/create access to its
+UID-derived replay topics,
 consumer-group access to its UID-derived replay groups, and transactional-ID
 access to its UID-derived copy producers. It never needs write access to source
-topics.
-Topic-management privileges are needed only when `topics.manage=true`.
+topics. Topic-management privileges are needed only when `topics.manage=true`.
 
 ## ClickHouse writer
 
