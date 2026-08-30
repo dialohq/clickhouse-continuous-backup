@@ -2,12 +2,12 @@
 
 Durable ClickHouse Sink is a Helm chart for append-only delivery from a
 Kafka-compatible log to ClickHouse, with coordinated incremental backup and
-exact-offset disaster recovery. It installs neither Kafka nor ClickHouse.
+exact backup checkpoints. It installs neither Kafka nor ClickHouse.
 
 ```text
 Kafka topic -> official ClickHouse Kafka Connect sink -> ClickHouse
                                                         |
-                                  backup + recovery-point manifest
+                                  backup + backup manifest
 ```
 
 The official ClickHouse connector uses deterministic retries and KeeperMap
@@ -78,7 +78,7 @@ backup:
 
 Network, Kafka, polling, hook, and backup deadlines have chart defaults under
 `timeouts` and `backup`. Override them for the deployment's latency and backup
-size; the recovery binary does not carry fallback durations of its own.
+size; the backup binary does not carry fallback durations of its own.
 
 Each backup Job briefly pauses all connectors writing one physical table,
 creates a copy-on-write target-table clone, captures and verifies their
@@ -88,8 +88,8 @@ KeeperMap rows and Kafka offsets. Target tables use one full backup followed by
 at most `maxIncrementalsPerFull` incrementals; `0` is the full-only default.
 
 The immutable `stateNamespace`, release name, pipeline names, topic names, and
-Kafka Connect internal topics are recovery identities. Do not rename them as a
-routine Helm change.
+Kafka Connect internal topics identify delivery and backup state. Do not rename
+them as a routine Helm change.
 
 ## Documentation
 
@@ -98,7 +98,6 @@ routine Helm change.
 - [Failure modes and unhandled boundaries](docs/failure-modes.md)
 - [Schema contract](docs/schema.md)
 - [Authentication and credential rotation](docs/authentication.md)
-- [Backup and recovery](docs/recovery.md)
 - [Backup procedure](docs/backup-procedure.md)
 - [Test plan](docs/testing.md)
 - [External design references](docs/references.md)

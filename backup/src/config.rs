@@ -6,7 +6,7 @@ use serde::{
     de::{DeserializeOwned, Error as _},
 };
 
-use crate::model::{Pipeline, kafka_name};
+use crate::model::Pipeline;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,25 +62,10 @@ pub struct BackupConfig {
     pub pause_timeout: Duration,
     pub kafka_bootstrap_servers: String,
     pub kafka_properties_file: Option<PathBuf>,
-    pub recovery_topic: String,
+    pub catalog_topic: String,
     pub max_incrementals_per_full: u32,
     pub max_backup_bandwidth: u64,
     pub pipelines: Vec<Pipeline>,
-    pub timeouts: RuntimeTimeouts,
-}
-
-#[derive(Clone, Debug)]
-pub struct RestoreConfig {
-    pub connect_url: String,
-    pub clickhouse_url: String,
-    pub clickhouse_username: String,
-    pub clickhouse_password: String,
-    pub connector_names: Vec<String>,
-    pub expected_backup_name: String,
-    pub manifest_file: String,
-    pub stop_timeout: Duration,
-    pub kafka_bootstrap_servers: String,
-    pub kafka_properties_file: Option<PathBuf>,
     pub timeouts: RuntimeTimeouts,
 }
 
@@ -150,43 +135,10 @@ impl BackupConfig {
             pause_timeout: seconds("PAUSE_TIMEOUT_SECONDS")?,
             kafka_bootstrap_servers: required("KAFKA_BOOTSTRAP_SERVERS")?,
             kafka_properties_file: optional("KAFKA_PROPERTIES_FILE").map(PathBuf::from),
-            recovery_topic: required("KAFKA_RECOVERY_TOPIC")?,
+            catalog_topic: required("KAFKA_BACKUP_CATALOG_TOPIC")?,
             max_incrementals_per_full: unsigned("MAX_INCREMENTALS_PER_FULL")?,
             max_backup_bandwidth: unsigned64("MAX_BACKUP_BANDWIDTH")?,
             pipelines,
-            timeouts: RuntimeTimeouts::from_environment()?,
-        })
-    }
-
-    pub fn kafka_properties(&self) -> Result<HashMap<String, String>> {
-        read_kafka_properties(self.kafka_properties_file.as_ref())
-    }
-}
-
-impl RestoreConfig {
-    pub fn from_environment() -> Result<Self> {
-        let connector_names = required("CONNECTOR_NAMES")?
-            .lines()
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        if connector_names.is_empty() {
-            bail!("CONNECTOR_NAMES must contain at least one connector")
-        }
-        if connector_names.iter().any(|name| !kafka_name(name)) {
-            bail!("CONNECTOR_NAMES contains an unsafe connector name")
-        }
-        Ok(Self {
-            connect_url: required("CONNECT_URL")?,
-            clickhouse_url: required("CLICKHOUSE_URL")?,
-            clickhouse_username: required("CLICKHOUSE_USERNAME")?,
-            clickhouse_password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
-            connector_names,
-            expected_backup_name: required("EXPECTED_BACKUP_NAME")?,
-            manifest_file: required("RECOVERY_MANIFEST_FILE")?,
-            stop_timeout: seconds("STOP_TIMEOUT_SECONDS")?,
-            kafka_bootstrap_servers: required("KAFKA_BOOTSTRAP_SERVERS")?,
-            kafka_properties_file: optional("KAFKA_PROPERTIES_FILE").map(PathBuf::from),
             timeouts: RuntimeTimeouts::from_environment()?,
         })
     }

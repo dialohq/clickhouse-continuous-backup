@@ -43,13 +43,6 @@ in {
             {name = "tcp"; port = 9000; targetPort = 9000;}
           ];
         };
-        clickhouse-restore.spec = {
-          selector = labels "clickhouse-restore";
-          ports = [
-            {name = "http"; port = 8123; targetPort = 8123;}
-            {name = "tcp"; port = 9000; targetPort = 9000;}
-          ];
-        };
         minio.spec = {
           selector = labels "minio";
           ports = [{name = "s3"; port = 9000; targetPort = 9000;}];
@@ -93,33 +86,6 @@ in {
           selector.matchLabels = labels "clickhouse";
           template = {
             metadata.labels = labels "clickhouse";
-            spec = {
-              containers = [{
-                name = "clickhouse";
-                image = "clickhouse/clickhouse-server:26.7";
-                env = [{name = "CLICKHOUSE_SKIP_USER_SETUP"; value = "1";}];
-                ports = [{name = "http"; containerPort = 8123;} {name = "tcp"; containerPort = 9000;}];
-                startupProbe = {httpGet = {path = "/ping"; port = "http";}; periodSeconds = 2; failureThreshold = 120;};
-                readinessProbe = {httpGet = {path = "/ping"; port = "http";}; periodSeconds = 3;};
-                resources.requests = {cpu = "500m"; memory = "1Gi";};
-                volumeMounts = [
-                  {name = "config"; mountPath = "/etc/clickhouse-server/config.d/e2e.xml"; subPath = "e2e.xml";}
-                  {name = "data"; mountPath = "/var/lib/clickhouse";}
-                ];
-              }];
-              volumes = [
-                {name = "config"; configMap.name = "clickhouse";}
-                {name = "data"; emptyDir = {};}
-              ];
-            };
-          };
-        };
-        clickhouse-restore.spec = {
-          serviceName = "clickhouse-restore";
-          replicas = 1;
-          selector.matchLabels = labels "clickhouse-restore";
-          template = {
-            metadata.labels = labels "clickhouse-restore";
             spec = {
               containers = [{
                 name = "clickhouse";

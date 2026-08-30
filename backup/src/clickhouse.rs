@@ -137,51 +137,6 @@ impl ClickHouse {
         Ok(())
     }
 
-    pub async fn ensure_keeper_table(&self, database: &str, table: &str, path: &str) -> Result<()> {
-        let existing: Vec<TableEngine> = self
-            .json_each_row(&format!(
-                "SELECT database, name, engine, create_table_query FROM system.tables WHERE database = '{database}' AND name = '{table}' FORMAT JSONEachRow"
-            ))
-            .await?;
-        match existing.as_slice() {
-            [] => {
-                self.query(&format!(
-                    "CREATE TABLE `{database}`.`{table}` (`key` String, `minOffset` Int64, `maxOffset` Int64, `state` String) ENGINE = KeeperMap('{path}') PRIMARY KEY `key`"
-                ))
-                .await?;
-            }
-            [existing]
-                if existing.engine == "KeeperMap"
-                    && existing
-                        .create_table_query
-                        .contains(&format!("KeeperMap('{path}')")) => {}
-            [existing] => bail!(
-                "recovery state table has an incompatible engine or Keeper path: {database}.{table} ({})",
-                existing.engine
-            ),
-            _ => bail!("ClickHouse returned duplicate state tables: {database}.{table}"),
-        }
-        Ok(())
-    }
-
-    pub async fn insert_keeper_rows(
-        &self,
-        database: &str,
-        table: &str,
-        rows: &[KeeperRow],
-    ) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let mut query = format!("INSERT INTO `{database}`.`{table}` FORMAT JSONEachRow\n");
-        for row in rows {
-            query.push_str(&serde_json::to_string(row)?);
-            query.push('\n');
-        }
-        self.query(&query).await?;
-        Ok(())
-    }
-
     pub async fn require_backup_engines(&self, pipelines: &[Pipeline]) -> Result<()> {
         self.require_engines(pipelines, true).await
     }
@@ -286,7 +241,7 @@ fn validate_engines(
                 })?;
             if state.engine != "KeeperMap" {
                 bail!(
-                    "recovery checkpoints require {database}.{state_table} to use KeeperMap, found {}",
+                    "backup manifests require {database}.{state_table} to use KeeperMap, found {}",
                     state.engine
                 )
             }

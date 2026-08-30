@@ -85,12 +85,12 @@ fn verify_watermarks(topic: &str, partition: i32, offset: u64, low: i64, high: i
     }
     if offset < low {
         bail!(
-            "Kafka retention removed required replay records for {topic}-{partition}: recovery offset {offset}, log start {low}"
+            "Kafka retention removed records required by the backup manifest for {topic}-{partition}: offset {offset}, log start {low}"
         )
     }
     if offset > high {
         bail!(
-            "recovery offset is beyond the Kafka log end for {topic}-{partition}: recovery offset {offset}, log end {high}"
+            "backup manifest offset is beyond the Kafka log end for {topic}-{partition}: offset {offset}, log end {high}"
         )
     }
     Ok(())

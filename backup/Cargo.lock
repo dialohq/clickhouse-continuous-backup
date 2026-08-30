@@ -153,7 +153,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "durable-clickhouse-recovery"
+name = "durable-clickhouse-backup"
 version = "0.1.0"
 dependencies = [
  "anyhow",

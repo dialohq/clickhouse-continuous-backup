@@ -124,7 +124,6 @@ done < <(find -L "$manifests/e2e" -maxdepth 1 -type f -name '*.yaml' | sort)
 
 wait_for_ready_pod app=redpanda
 wait_for_ready_pod app=clickhouse
-wait_for_ready_pod app=clickhouse-restore
 wait_for_ready_pod app=minio
 k -n "$namespace" wait job/minio-bucket --for=condition=Complete --timeout=300s
 k -n "$namespace" wait job/schema --for=condition=Complete --timeout=300s
@@ -138,10 +137,6 @@ wait_for_ready_pod app.kubernetes.io/component=connect
 
 clickhouse() {
   k -n "$namespace" exec clickhouse-0 -- clickhouse-client --query "$1"
-}
-
-restore_clickhouse() {
-  k -n "$namespace" exec clickhouse-restore-0 -- clickhouse-client --query "$1"
 }
 
 connector_request() {
@@ -267,22 +262,21 @@ k -n "$namespace" wait pod/during-base-upload --for=jsonpath='{.status.phase}'=S
 wait_count 1150 'SELECT count() FROM durable_e2e.records'
 base_output=$(wait_backup e2e-backup-base)
 base=$(jq -r '.name' <<<"$base_output")
-base_id=$(jq -r '.recovery_point.backup.id' <<<"$base_output")
-base_manifest=$(jq --compact-output '.recovery_point' <<<"$base_output")
+base_id=$(jq -r '.manifest.backup.id' <<<"$base_output")
+base_manifest=$(jq --compact-output '.manifest' <<<"$base_output")
 jq --exit-status '.backup.kind == "full" and .backup.position == 0 and (.backup | has("base") | not)' <<<"$base_manifest" >/dev/null
 
-restore_clickhouse 'CREATE DATABASE durable_e2e'
-restore_clickhouse "RESTORE TABLE durable_e2e.records AS durable_e2e.base_snapshot_probe FROM $base"
-[[ $(restore_clickhouse 'SELECT count() FROM durable_e2e.base_snapshot_probe') == 1100 ]]
-restore_clickhouse 'DROP TABLE durable_e2e.base_snapshot_probe SYNC'
+clickhouse "RESTORE TABLE durable_e2e.records AS durable_e2e.base_snapshot_probe FROM $base"
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.base_snapshot_probe') == 1100 ]]
+clickhouse 'DROP TABLE durable_e2e.base_snapshot_probe SYNC'
 
 incremental_one_output=$(run_backup e2e-backup-incremental-one)
 incremental_one=$(jq -r '.name' <<<"$incremental_one_output")
-incremental_one_id=$(jq -r '.recovery_point.backup.id' <<<"$incremental_one_output")
+incremental_one_id=$(jq -r '.manifest.backup.id' <<<"$incremental_one_output")
 jq --exit-status --arg id "$base_id" --arg name "$base" '
-  .recovery_point.backup.kind == "incremental" and
-  .recovery_point.backup.position == 1 and
-  .recovery_point.backup.base == {id: $id, name: $name}
+  .manifest.backup.kind == "incremental" and
+  .manifest.backup.position == 1 and
+  .manifest.backup.base == {id: $id, name: $name}
 ' <<<"$incremental_one_output" >/dev/null
 
 start_producer incremental-two-records 1151 1200
@@ -290,8 +284,8 @@ k -n "$namespace" wait pod/incremental-two-records --for=jsonpath='{.status.phas
 wait_count 1200 'SELECT count() FROM durable_e2e.records'
 incremental_two_output=$(run_backup e2e-backup-incremental-two)
 backup=$(jq -r '.name' <<<"$incremental_two_output")
-backup_id=$(jq -r '.recovery_point.backup.id' <<<"$incremental_two_output")
-manifest=$(jq --compact-output '.recovery_point' <<<"$incremental_two_output")
+backup_id=$(jq -r '.manifest.backup.id' <<<"$incremental_two_output")
+manifest=$(jq --compact-output '.manifest' <<<"$incremental_two_output")
 jq --exit-status --arg id "$incremental_one_id" --arg name "$incremental_one" '
   .backup.kind == "incremental" and
   .backup.position == 2 and
@@ -306,112 +300,21 @@ jq --exit-status --arg id "$incremental_one_id" --arg name "$incremental_one" '
 kafka_manifest=$(k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
   /bin/kafka-console-consumer.sh \
     --bootstrap-server redpanda:9092 \
-    --topic sink-durable-clickhouse-sink.recovery-points \
+    --topic sink-durable-clickhouse-sink.backups \
     --partition 0 \
     --from-beginning \
     --timeout-ms 10000 2>/dev/null |
   jq --raw-input --compact-output --arg id "$backup_id" 'fromjson? | select(.backup.id == $id)' | tail -1)
 if ! jq --exit-status --argjson expected "$manifest" '. == $expected' <<<"$kafka_manifest" >/dev/null; then
-  echo "recovery-point topic did not return the Job manifest" >&2
+  echo "backup catalog did not return the Job manifest" >&2
   printf 'expected: %s\nactual: %s\n' "$manifest" "$kafka_manifest" >&2
   exit 1
 fi
 
-start_producer pre-restore-tail 1201 1250
-k -n "$namespace" wait pod/pre-restore-tail --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+start_producer final-records 1201 1250
+k -n "$namespace" wait pod/final-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 wait_count 1250 'SELECT count() FROM durable_e2e.records'
 rollover_output=$(run_backup e2e-backup-rollover)
-jq --exit-status '.recovery_point.backup.kind == "full" and .recovery_point.backup.position == 0' <<<"$rollover_output" >/dev/null
+jq --exit-status '.manifest.backup.kind == "full" and .manifest.backup.position == 0' <<<"$rollover_output" >/dev/null
 
-restore_clickhouse "CREATE TABLE durable_e2e.records (record_key String, recorded_at DateTime64(3, 'UTC'), payload String) ENGINE = ReplicatedMergeTree('/clickhouse/tables/durable_e2e/records', '01') ORDER BY (recorded_at, record_key)"
-restore_clickhouse "RESTORE TABLE durable_e2e.records FROM $backup SETTINGS allow_different_table_def = true"
-[[ $(restore_clickhouse 'SELECT count() FROM durable_e2e.records') == 1200 ]]
-[[ $(restore_clickhouse 'SELECT uniqExact(record_key) FROM durable_e2e.records') == 1200 ]]
-
-connector_request PUT /stop
-wait_connector_state STOPPED
-runtime_timeouts=$(k -n "$namespace" get cronjob/sink-durable-clickhouse-sink-backup -o json |
-  jq -r '.spec.jobTemplate.spec.template.spec.containers[0].env[] | select(.name == "RUNTIME_TIMEOUTS").value')
-apply_recovery() {
-  local recovery_manifest=$1 expected_backup=$2
-  printf '%s\n' "$recovery_manifest" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
-    env \
-      CONNECT_URL=http://localhost:8083 \
-      CLICKHOUSE_URL=http://clickhouse-restore:8123/ \
-      CLICKHOUSE_USERNAME=default \
-      CLICKHOUSE_PASSWORD= \
-      CONNECTOR_NAMES=sink-durable-clickhouse-sink-records \
-      EXPECTED_BACKUP_NAME="$expected_backup" \
-      RECOVERY_MANIFEST_FILE=- \
-      STOP_TIMEOUT_SECONDS=120 \
-      KAFKA_BOOTSTRAP_SERVERS=redpanda:9092 \
-      RUNTIME_TIMEOUTS="$runtime_timeouts" \
-      /bin/durable-clickhouse-recovery restore-offsets
-}
-
-assert_recovery_rejected() {
-  local pathology=$1 recovery_manifest=$2 expected_backup=$3 offsets_before offsets_after
-  offsets_before=$(connector_request GET /offsets | jq --sort-keys --compact-output .)
-  if apply_recovery "$recovery_manifest" "$expected_backup" >/dev/null 2>&1; then
-    echo "recovery accepted pathology: $pathology" >&2
-    exit 1
-  fi
-  offsets_after=$(connector_request GET /offsets | jq --sort-keys --compact-output .)
-  if [[ $offsets_after != "$offsets_before" ]]; then
-    echo "rejected recovery changed Connect offsets: $pathology" >&2
-    exit 1
-  fi
-}
-
-offset_plus_one=$(jq --compact-output '(.connectors[0].offsets[0].offset.kafka_offset) += 1' <<<"$manifest")
-offset_minus_one=$(jq --compact-output '(.connectors[0].offsets[0].offset.kafka_offset) -= 1' <<<"$manifest")
-duplicate_offset=$(jq --compact-output '.connectors[0].offsets += [.connectors[0].offsets[0]]' <<<"$manifest")
-assert_recovery_rejected exact-offset-plus-one "$offset_plus_one" "$backup"
-assert_recovery_rejected exact-offset-minus-one "$offset_minus_one" "$backup"
-assert_recovery_rejected duplicate-topic-partition "$duplicate_offset" "$backup"
-assert_recovery_rejected wrong-target-backup "$manifest" "$base"
-
-connector_request PUT /resume
-wait_connector_state RUNNING
-assert_recovery_rejected connector-running "$manifest" "$backup"
-connector_request PUT /stop
-wait_connector_state STOPPED
-
-keeper_path=$(jq -r '.connectors[0].keeper.path' <<<"$manifest")
-restore_clickhouse "CREATE TABLE durable_e2e.durable_sink_e2e_records_state (key String, minOffset Int64, maxOffset Int64, state String) ENGINE = KeeperMap('$keeper_path') PRIMARY KEY key"
-first_keeper_row=$(jq --compact-output '.connectors[0].keeper.rows[0]' <<<"$manifest")
-wrong_keeper_row=$(jq --compact-output '.connectors[0].keeper.rows[0] | .maxOffset += 1' <<<"$manifest")
-printf '%s\n' "$wrong_keeper_row" | k -n "$namespace" exec -i clickhouse-restore-0 -- \
-  clickhouse-client --query 'INSERT INTO durable_e2e.durable_sink_e2e_records_state FORMAT JSONEachRow'
-assert_recovery_rejected conflicting-existing-keeper "$manifest" "$backup"
-restore_clickhouse 'DROP TABLE durable_e2e.durable_sink_e2e_records_state SYNC'
-
-restore_clickhouse "CREATE TABLE durable_e2e.durable_sink_e2e_records_state (key String, minOffset Int64, maxOffset Int64, state String) ENGINE = KeeperMap('$keeper_path') PRIMARY KEY key"
-printf '%s\n' "$first_keeper_row" | k -n "$namespace" exec -i clickhouse-restore-0 -- \
-  clickhouse-client --query 'INSERT INTO durable_e2e.durable_sink_e2e_records_state FORMAT JSONEachRow'
-
-apply_recovery "$manifest" "$backup" >/dev/null
-apply_recovery "$manifest" "$backup" >/dev/null
-
-helm --kubeconfig "$kubeconfig" upgrade sink "$chart" \
-  --namespace "$namespace" --values "$values" \
-  --set-string clickhouse.host=clickhouse-restore.durable-sink-e2e.svc.cluster.local \
-  --set-string clickhouse.database=durable_e2e \
-  --set backup.enabled=false \
-  --wait --timeout 10m
-
-connector_request PUT /resume
-wait_connector_state RUNNING
-
-start_producer post-restore-records 1251 1300
-k -n "$namespace" wait pod/post-restore-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
-for _ in {1..240}; do
-  restored=$(restore_clickhouse 'SELECT count() FROM durable_e2e.records' 2>/dev/null || true)
-  [[ $restored == 1300 ]] && break
-  sleep 1
-done
-[[ $restored == 1300 ]]
-[[ $(restore_clickhouse 'SELECT uniqExact(record_key) FROM durable_e2e.records') == 1300 ]]
-[[ $(clickhouse 'SELECT count() FROM durable_e2e.records') == 1250 ]]
-
-echo "RKE2 E2E passed: crash retries, ingestion during snapshot upload, full/incremental rollover, KeeperMap rehydration, adversarial recovery rejection, tail replay, and restore cutover"
+echo "RKE2 E2E passed: crash retries, ingestion during snapshot upload, immutable backup restore probe, exact backup manifest, and full/incremental rollover"

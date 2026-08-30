@@ -31,11 +31,10 @@ ssl.ca.location=/etc/ssl/certs/ca-bundle.crt
 ```
 
 The Kafka principal needs read access to configured input topics and access to
-the Connect internal, consumer-offset, and recovery-point resources it owns.
-The backup Job needs
-read/write access to the recovery-point topic, transactional-ID access for its
-manifest transaction, and consumer-group access to the topic-derived
-`<recovery-topic>.backup-lock` group. Recovery tooling needs read access.
+the Connect internal and consumer-offset resources it owns. The backup Job
+needs read/write access to the backup catalog topic, transactional-ID access
+for its manifest transaction, and consumer-group access to the topic-derived
+`<backup-catalog-topic>.backup-lock` group.
 Topic-management privileges are needed only when `topics.manage=true`.
 
 ## ClickHouse writer
@@ -68,12 +67,11 @@ The backup identity needs `SELECT` on target and KeeperMap tables, `CREATE
 TABLE` and `DROP TABLE` for temporary copy-on-write snapshots, access to
 `system.backups` and `system.tables`, and ClickHouse's `BACKUP` permission for
 the snapshot objects. It also reads `system.merge_tree_settings` to reject a
-disabled effective replicated deduplication window. The recovery identity needs
-`CREATE TABLE`, `SELECT`, and `INSERT` for the restored KeeperMap tables. Neither
-identity should be the ingestion writer.
+disabled effective replicated deduplication window. The backup identity should
+not be the ingestion writer.
 
 RGW/S3 credentials are not passed through Helm. Configure
-`backup.namedCollection` on every source and restore ClickHouse server. The
+`backup.namedCollection` on every ClickHouse server. The
 collection may use fixed access keys for a test such as MinIO, environment or
 instance credentials where supported, or credentials managed by the
 ClickHouse deployment.
@@ -90,4 +88,4 @@ controller; the chart itself does not assume one.
 
 Short-lived credentials are safe only when the external issuer, Secret sync,
 and restart controller are tested together. Prefer renewable credentials whose
-lease comfortably exceeds the maximum restart and incident-recovery time.
+lease comfortably exceeds the maximum restart and backup duration.

@@ -29,7 +29,7 @@ impl Catalog {
     ) -> Result<Self> {
         let lock_group = format!("{topic}.backup-lock");
         if lock_group.len() > 255 {
-            bail!("recovery topic is too long to derive the backup lock group")
+            bail!("backup catalog topic is too long to derive the lock group")
         }
         let mut common = ClientConfig::new();
         for (key, value) in properties {
@@ -42,7 +42,7 @@ impl Catalog {
             .set("enable.idempotence", "true")
             .set(
                 "transactional.id",
-                format!("durable-clickhouse-recovery-{run_id}"),
+                format!("durable-clickhouse-backup-{run_id}"),
             )
             .create()?;
         let consumer = common
@@ -72,13 +72,13 @@ impl Catalog {
             .consumer
             .fetch_metadata(Some(&self.topic), self.metadata_timeout)?;
         let [topic] = metadata.topics() else {
-            bail!("Kafka did not return exactly one recovery topic")
+            bail!("Kafka did not return exactly one backup catalog topic")
         };
         if let Some(error) = topic.error() {
-            bail!("Kafka recovery-topic metadata failed: {error:?}")
+            bail!("Kafka backup-catalog metadata failed: {error:?}")
         }
         if topic.partitions().len() != 1 {
-            bail!("the recovery topic must have exactly one partition")
+            bail!("the backup catalog topic must have exactly one partition")
         }
         self.consumer.subscribe(&[&self.topic])?;
         let first = tokio::time::timeout(self.acquire_timeout, self.consumer.recv())
@@ -88,7 +88,7 @@ impl Catalog {
             .consumer
             .fetch_watermarks(&self.topic, 0, self.metadata_timeout)?;
         if low < 0 || high < low {
-            bail!("Kafka returned invalid recovery-topic watermarks: {low}..{high}")
+            bail!("Kafka returned invalid backup-catalog watermarks: {low}..{high}")
         }
         let mut value = None;
         match first {
@@ -106,7 +106,7 @@ impl Catalog {
                 }
                 Ok(Err(rdkafka::error::KafkaError::PartitionEOF(_))) => break,
                 Ok(Err(error)) => return Err(error.into()),
-                Err(_) => bail!("timed out reading recovery catalog"),
+                Err(_) => bail!("timed out reading the backup catalog"),
             }
         }
         Ok(value)
@@ -114,7 +114,7 @@ impl Catalog {
 
     pub async fn publish(&self, records: &[(&str, &str)]) -> Result<()> {
         if records.is_empty() {
-            bail!("at least one recovery catalog record is required")
+            bail!("at least one backup catalog record is required")
         }
         self.producer.init_transactions(self.transaction_timeout)?;
         self.producer.begin_transaction()?;
@@ -133,7 +133,7 @@ impl Catalog {
                 self.producer
                     .abort_transaction(self.transaction_timeout)
                     .ok();
-                return Err(error).context("failed to publish recovery catalog record");
+                return Err(error).context("failed to publish backup catalog record");
             }
         }
         self.producer.commit_transaction(self.transaction_timeout)?;

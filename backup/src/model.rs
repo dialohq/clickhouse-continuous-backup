@@ -151,7 +151,7 @@ pub struct BackupDependency {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RecoveryPoint {
+pub struct BackupManifest {
     pub created_at: String,
     pub backup: BackupReference,
     pub connectors: Vec<ConnectorCheckpoint>,
@@ -182,5 +182,5 @@ pub struct BackupDetails {
 pub struct BackupOutput<'a> {
     #[serde(flatten)]
     pub details: &'a BackupDetails,
-    pub recovery_point: &'a RecoveryPoint,
+    pub manifest: &'a BackupManifest,
 }

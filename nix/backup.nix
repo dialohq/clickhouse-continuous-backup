@@ -1,6 +1,6 @@
 {rustPlatform, pkg-config, rustfmt, clippy, openssl, cyrus_sasl, rdkafka}:
 rustPlatform.buildRustPackage {
-  pname = "durable-clickhouse-recovery";
+  pname = "durable-clickhouse-backup";
   version = "0.1.0";
 
   src = ../backup;

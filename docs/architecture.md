@@ -22,9 +22,9 @@ Each connector uses a stable Keeper path and state table derived from
 durable_sink_<stateNamespace>_<pipeline>_state
 ```
 
-The state table is created in the target database. Every recovery manifest
-stores its complete rows and Keeper path. Recovery recreates an empty KeeperMap
-and rehydrates those rows before changing Kafka Connect offsets.
+The state table is created in the target database. Every backup manifest stores
+its complete rows, Keeper path, and exact input offsets alongside the archive
+identity.
 
 ## Why the target is not ReplacingMergeTree
 
@@ -40,11 +40,11 @@ separate rows.
 
 ## Failure behavior
 
-| Failure point | Recovery source | Result |
+| Failure point | Durable state | Result |
 | --- | --- | --- |
 | Connect dies before ClickHouse acknowledgement | input topic and KeeperMap | deterministic block retry |
 | Connect dies after insert but before offset commit | KeeperMap and ClickHouse block hash | inserted block is not duplicated |
-| ClickHouse data loss | target-table backup, recovery manifest, and retained input log | KeeperMap rehydration and verified exact-offset tail replay |
+| Backup Job fails before catalog commit | live tables and input topic | ingestion continues and no completed backup is published |
 
 ## Boundaries
 

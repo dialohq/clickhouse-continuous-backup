@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, Method};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::time::{Instant, sleep};
 
 use crate::{
@@ -50,23 +50,6 @@ impl Connect {
             bail!("connector must be fully running before backup: {connector}")
         }
         Ok(())
-    }
-
-    pub async fn require_stopped(&self, connector: &str, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let status = self.status(connector).await?;
-            if status.connector.state != "STOPPED" {
-                bail!("connector must be stopped before restoring offsets: {connector}")
-            }
-            if status.tasks.iter().all(|task| task.state == "STOPPED") {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                bail!("connector tasks did not stop: {connector}")
-            }
-            sleep(self.poll_interval).await;
-        }
     }
 
     pub async fn pause(&self, connector: &str) -> Result<()> {
@@ -120,16 +103,6 @@ impl Connect {
         validate_offsets(&offsets.offsets)
             .with_context(|| format!("connector returned invalid offsets: {connector}"))?;
         Ok(offsets.offsets)
-    }
-
-    pub async fn patch_offsets(&self, connector: &str, offsets: &[KafkaOffset]) -> Result<()> {
-        self.request(
-            Method::PATCH,
-            &format!("connectors/{connector}/offsets"),
-            Some(json!({"offsets": offsets})),
-        )
-        .await?;
-        Ok(())
     }
 
     async fn status(&self, connector: &str) -> Result<Status> {

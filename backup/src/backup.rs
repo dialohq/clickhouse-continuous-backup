@@ -11,9 +11,9 @@ use crate::{
     connect::{Connect, validate_offsets},
     kafka::KafkaLog,
     model::{
-        BackupDependency, BackupDetails, BackupKind, BackupOutput, BackupReference, CHAIN_HEAD_KEY,
-        ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue, KafkaPartition,
-        KeeperCheckpoint, KeeperRow, Pipeline, RecoveryPoint, kafka_name,
+        BackupDependency, BackupDetails, BackupKind, BackupManifest, BackupOutput, BackupReference,
+        CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue,
+        KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline, kafka_name,
     },
     snapshot::SnapshotLayout,
 };
@@ -48,7 +48,7 @@ pub async fn run() -> Result<()> {
     let catalog = Catalog::new(
         &config.kafka_bootstrap_servers,
         &config.kafka_properties()?,
-        config.recovery_topic.clone(),
+        config.catalog_topic.clone(),
         &config.run_id,
         &config.timeouts,
     )?;
@@ -75,8 +75,7 @@ pub async fn run() -> Result<()> {
     let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines);
     snapshots.cleanup(&clickhouse).await?;
 
-    let operation =
-        create_recovery_point(&config, &connect, &clickhouse, &catalog, &plan, &snapshots);
+    let operation = create_backup(&config, &connect, &clickhouse, &catalog, &plan, &snapshots);
     tokio::pin!(operation);
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -97,7 +96,7 @@ pub async fn run() -> Result<()> {
     }
 }
 
-async fn create_recovery_point(
+async fn create_backup(
     config: &BackupConfig,
     connect: &Connect,
     clickhouse: &ClickHouse,
@@ -117,11 +116,11 @@ async fn create_recovery_point(
     kafka.verify(&checkpoints)?;
     let archives = create_archives(config, clickhouse, plan, snapshots).await?;
 
-    let recovery_point = build_recovery_point(&archives, checkpoints);
-    validate_recovery_point(&recovery_point)?;
-    kafka.verify(&recovery_point.connectors)?;
-    commit_recovery_point(catalog, plan, &recovery_point).await?;
-    print_output(&archives, &recovery_point)?;
+    let manifest = build_manifest(&archives, checkpoints);
+    validate_manifest(&manifest)?;
+    kafka.verify(&manifest.connectors)?;
+    commit_manifest(catalog, plan, &manifest).await?;
+    print_output(&archives, &manifest)?;
     Ok(())
 }
 
@@ -176,11 +175,11 @@ async fn create_archives(
     })
 }
 
-fn build_recovery_point(
+fn build_manifest(
     archives: &CreatedArchives,
     connectors: Vec<ConnectorCheckpoint>,
-) -> RecoveryPoint {
-    RecoveryPoint {
+) -> BackupManifest {
+    BackupManifest {
         created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         backup: archives.target.clone(),
         connectors,
@@ -188,27 +187,27 @@ fn build_recovery_point(
 }
 
 /// Publishes the manifest and chain head atomically; this is the backup's commit point.
-async fn commit_recovery_point(
+async fn commit_manifest(
     catalog: &Catalog,
     plan: &BackupPlan,
-    recovery_point: &RecoveryPoint,
+    manifest: &BackupManifest,
 ) -> Result<()> {
-    let head = next_head(plan, recovery_point.backup.clone());
-    let manifest = serde_json::to_string(&recovery_point)?;
+    let head = next_head(plan, manifest.backup.clone());
+    let manifest_json = serde_json::to_string(&manifest)?;
     let head_value = serde_json::to_string(&head)?;
-    let backup_id = recovery_point.backup.id.to_string();
+    let backup_id = manifest.backup.id.to_string();
     catalog
-        .publish(&[(&backup_id, &manifest), (CHAIN_HEAD_KEY, &head_value)])
+        .publish(&[(&backup_id, &manifest_json), (CHAIN_HEAD_KEY, &head_value)])
         .await?;
     Ok(())
 }
 
-fn print_output(archives: &CreatedArchives, recovery_point: &RecoveryPoint) -> Result<()> {
+fn print_output(archives: &CreatedArchives, manifest: &BackupManifest) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&BackupOutput {
             details: &archives.target_details,
-            recovery_point
+            manifest
         })?
     );
     Ok(())
@@ -403,7 +402,7 @@ fn validate_head(head: Option<&ChainHead>, pipelines: &[Pipeline]) -> Result<()>
     Ok(())
 }
 
-pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
+pub fn validate_manifest(point: &BackupManifest) -> Result<()> {
     let backup = &point.backup;
     let valid_backup = match backup.kind {
         BackupKind::Full => backup.position == 0 && backup.base.is_none(),
@@ -418,7 +417,7 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
             .is_some_and(|base| !backup_destination(&base.name))
         || !valid_backup
     {
-        bail!("invalid recovery-point manifest")
+        bail!("invalid backup manifest")
     }
     let mut names = point
         .connectors
@@ -427,7 +426,7 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
         .collect::<Vec<_>>();
     names.sort_unstable();
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
-        bail!("invalid recovery-point manifest")
+        bail!("invalid backup manifest")
     }
     for connector in &point.connectors {
         validate_offsets(&connector.offsets)?;
@@ -457,13 +456,13 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
             })
             || row_keys.windows(2).any(|pair| pair[0] == pair[1])
         {
-            bail!("invalid recovery-point manifest")
+            bail!("invalid backup manifest")
         }
         for (partition, exact) in connector.offsets.iter().enumerate() {
             if exact.partition.kafka_topic != connector.topic
                 || exact.partition.kafka_partition != partition as u32
             {
-                bail!("invalid recovery-point manifest")
+                bail!("invalid backup manifest")
             }
             let key = format!(
                 "{}-{}",
@@ -482,7 +481,7 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
                 .transpose()?
                 .unwrap_or(0);
             if exact.offset.kafka_offset != expected {
-                bail!("recovery offset does not match ClickHouse KeeperMap state")
+                bail!("backup offset does not match ClickHouse KeeperMap state")
             }
             if connector
                 .observed_connect_offsets
@@ -502,7 +501,7 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
                     )
             })
         }) {
-            bail!("invalid recovery-point manifest")
+            bail!("invalid backup manifest")
         }
     }
     Ok(())
@@ -844,8 +843,8 @@ mod tests {
         assert!(validate_head(Some(&head(2)), &[different]).is_err());
     }
 
-    fn recovery_point() -> RecoveryPoint {
-        RecoveryPoint {
+    fn manifest() -> BackupManifest {
+        BackupManifest {
             created_at: "2026-08-30T12:00:00Z".to_owned(),
             backup: reference(BackupKind::Full, 0),
             connectors: vec![ConnectorCheckpoint {
@@ -865,99 +864,99 @@ mod tests {
     }
 
     #[test]
-    fn validates_exact_recovery_point() {
-        assert!(validate_recovery_point(&recovery_point()).is_ok());
+    fn validates_exact_manifest() {
+        assert!(validate_manifest(&manifest()).is_ok());
     }
 
     #[test]
-    fn rejects_tampered_recovery_offset() {
-        let mut point = recovery_point();
+    fn rejects_tampered_backup_offset() {
+        let mut point = manifest();
         point.connectors[0].offsets[0].offset.kafka_offset = 9;
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].offsets[0].offset.kafka_offset = 11;
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
     }
 
     #[test]
     fn rejects_observed_offset_ahead_in_manifest() {
-        let mut point = recovery_point();
+        let mut point = manifest();
         point.connectors[0].observed_connect_offsets[0]
             .offset
             .kafka_offset = 11;
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
     }
 
     #[test]
     fn rejects_duplicate_connector_and_keeper_keys() {
-        let mut point = recovery_point();
+        let mut point = manifest();
         point.connectors.push(point.connectors[0].clone());
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         let row = point.connectors[0].keeper.rows[0].clone();
         point.connectors[0].keeper.rows.push(row);
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].offsets.pop();
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0]
             .observed_connect_offsets
             .push(offset(0, 8));
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
     }
 
     #[test]
     fn rejects_invalid_backup_shape() {
-        let mut point = recovery_point();
+        let mut point = manifest();
         point.backup.kind = BackupKind::Incremental;
-        assert!(validate_recovery_point(&point).is_err());
-        point = recovery_point();
+        assert!(validate_manifest(&point).is_err());
+        point = manifest();
         point.backup.position = 1;
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
     }
 
     #[test]
     fn rejects_tampered_topic_partition_shape() {
-        let mut point = recovery_point();
+        let mut point = manifest();
         point.connectors[0].offsets.swap(0, 1);
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].partitions = 2;
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].topic = "other".to_owned();
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].observed_connect_offsets[0]
             .partition
             .kafka_partition = 3;
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
     }
 
     #[test]
     fn rejects_unsafe_keeper_identity_and_range() {
-        let mut point = recovery_point();
+        let mut point = manifest();
         point.connectors[0].keeper.table = "records`; DROP DATABASE records".to_owned();
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].keeper.rows[0].min_offset = 10;
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].keeper.path = "/durable-clickhouse-sink/../records".to_owned();
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
 
-        point = recovery_point();
+        point = manifest();
         point.connectors[0].keeper.rows[0].key = "records.input-1".to_owned();
-        assert!(validate_recovery_point(&point).is_err());
+        assert!(validate_manifest(&point).is_err());
     }
 }

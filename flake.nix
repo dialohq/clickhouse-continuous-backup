@@ -1,5 +1,5 @@
 {
-  description = "Durable Kafka-compatible ingestion into ClickHouse with backup and recovery";
+  description = "Durable Kafka-compatible ingestion into ClickHouse with incremental backups";
 
   nixConfig = {
     extra-substituters = ["https://nix-community.cachix.org"];
@@ -142,7 +142,7 @@
           echo "backup unexpectedly uses server-local Disk metadata" >&2
           exit 1
         fi
-        grep -F '/bin/durable-clickhouse-recovery' rendered.yaml >/dev/null
+        grep -F '/bin/durable-clickhouse-backup' rendered.yaml >/dev/null
         grep -F 'validate-targets' rendered.yaml >/dev/null
         grep -F 'async_insert=0,insert_deduplicate=1' rendered.yaml >/dev/null
         grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
@@ -150,13 +150,13 @@
         grep -F 'BACKUP_PIPELINES' rendered.yaml >/dev/null
         grep -F 'MAX_INCREMENTALS_PER_FULL' rendered.yaml >/dev/null
         grep -F 'MAX_BACKUP_BANDWIDTH' rendered.yaml >/dev/null
-        grep -F 'KAFKA_RECOVERY_TOPIC' rendered.yaml >/dev/null
+        grep -F 'KAFKA_BACKUP_CATALOG_TOPIC' rendered.yaml >/dev/null
         grep -F 'RUNTIME_TIMEOUTS' rendered.yaml >/dev/null
         grep -F 'activeDeadlineSeconds: 21600' rendered.yaml >/dev/null
         grep -F 'activeDeadlineSeconds: 600' rendered.yaml >/dev/null
         grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
-        grep -F '.recovery-points' rendered.yaml >/dev/null
+        grep -F '.backup-catalog' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
         touch $out
       '';
