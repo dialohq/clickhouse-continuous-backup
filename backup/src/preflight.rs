@@ -8,6 +8,7 @@ pub async fn run() -> Result<()> {
         config.clickhouse_url,
         config.clickhouse_username,
         config.clickhouse_password,
+        &config.timeouts,
     )?
     .require_target_engines(&config.pipelines)
     .await

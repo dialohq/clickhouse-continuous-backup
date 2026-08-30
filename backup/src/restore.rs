@@ -33,18 +33,23 @@ pub async fn run() -> Result<()> {
         bail!("manifest connector set does not match this release")
     }
 
-    let connect = Connect::new(config.connect_url.clone())?;
+    let connect = Connect::new(config.connect_url.clone(), &config.timeouts)?;
     for connector in &config.connector_names {
         connect
             .require_stopped(connector, config.stop_timeout)
             .await?;
     }
 
-    let kafka = KafkaLog::new(&config.kafka_bootstrap_servers, &config.kafka_properties()?)?;
+    let kafka = KafkaLog::new(
+        &config.kafka_bootstrap_servers,
+        &config.kafka_properties()?,
+        &config.timeouts,
+    )?;
     let clickhouse = ClickHouse::new(
         config.clickhouse_url,
         config.clickhouse_username,
         config.clickhouse_password,
+        &config.timeouts,
     )?;
     for checkpoint in &point.connectors {
         let actual = clickhouse

@@ -6,12 +6,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 
-use crate::model::{ConnectOffsets, KafkaOffset};
+use crate::{
+    config::RuntimeTimeouts,
+    model::{ConnectOffsets, KafkaOffset},
+};
 
 #[derive(Clone)]
 pub struct Connect {
     client: Client,
     base_url: String,
+    poll_interval: Duration,
 }
 
 #[derive(Deserialize)]
@@ -26,13 +30,14 @@ struct Component {
 }
 
 impl Connect {
-    pub fn new(base_url: String) -> Result<Self> {
+    pub fn new(base_url: String, timeouts: &RuntimeTimeouts) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(15))
+                .connect_timeout(timeouts.connect_connect)
+                .timeout(timeouts.connect_request)
                 .build()?,
             base_url: base_url.trim_end_matches('/').to_owned(),
+            poll_interval: timeouts.connect_poll,
         })
     }
 
@@ -60,7 +65,7 @@ impl Connect {
             if Instant::now() >= deadline {
                 bail!("connector tasks did not stop: {connector}")
             }
-            sleep(Duration::from_secs(1)).await;
+            sleep(self.poll_interval).await;
         }
     }
 
@@ -88,7 +93,7 @@ impl Connect {
             if Instant::now() >= deadline {
                 bail!("connector did not pause: {connector}")
             }
-            sleep(Duration::from_secs(1)).await;
+            sleep(self.poll_interval).await;
         }
     }
 

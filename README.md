@@ -81,6 +81,10 @@ backup:
     passwordKey: password
 ```
 
+Network, Kafka, polling, hook, and backup deadlines have chart defaults under
+`timeouts` and `backup`. Override them for the deployment's latency and backup
+size; the recovery binary does not carry fallback durations of its own.
+
 Each backup Job verifies the connector tasks, pauses and drains them, snapshots
 their KeeperMap state, creates and verifies a direct S3 backup, and publishes a
 recovery-point manifest to a compacted Kafka topic. Event tables use one full

@@ -35,7 +35,7 @@ pub async fn run() -> Result<()> {
         .iter()
         .map(|pipeline| pipeline.connector.as_str())
         .collect::<Vec<_>>();
-    let connect = Connect::new(config.connect_url.clone())?;
+    let connect = Connect::new(config.connect_url.clone(), &config.timeouts)?;
     for connector in &connectors {
         connect.require_running(connector).await?;
     }
@@ -45,6 +45,7 @@ pub async fn run() -> Result<()> {
         &config.kafka_properties()?,
         config.recovery_topic.clone(),
         &config.run_id,
+        &config.timeouts,
     )?;
     let head = catalog
         .get(CHAIN_HEAD_KEY)
@@ -96,6 +97,7 @@ async fn execute(
         config.clickhouse_url.clone(),
         config.clickhouse_username.clone(),
         config.clickhouse_password.clone(),
+        &config.timeouts,
     )?;
     clickhouse.require_backup_engines(&config.pipelines).await?;
     let mut checkpoints = Vec::with_capacity(config.pipelines.len());
@@ -106,7 +108,11 @@ async fn execute(
             .await?;
         checkpoints.push(checkpoint(pipeline, observed, rows)?);
     }
-    let kafka = KafkaLog::new(&config.kafka_bootstrap_servers, &config.kafka_properties()?)?;
+    let kafka = KafkaLog::new(
+        &config.kafka_bootstrap_servers,
+        &config.kafka_properties()?,
+        &config.timeouts,
+    )?;
     kafka.verify(&checkpoints)?;
 
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");

@@ -6,14 +6,19 @@ use rdkafka::{
     consumer::{BaseConsumer, Consumer},
 };
 
-use crate::model::ConnectorCheckpoint;
+use crate::{config::RuntimeTimeouts, model::ConnectorCheckpoint};
 
 pub struct KafkaLog {
     consumer: BaseConsumer,
+    metadata_timeout: Duration,
 }
 
 impl KafkaLog {
-    pub fn new(bootstrap_servers: &str, properties: &HashMap<String, String>) -> Result<Self> {
+    pub fn new(
+        bootstrap_servers: &str,
+        properties: &HashMap<String, String>,
+        timeouts: &RuntimeTimeouts,
+    ) -> Result<Self> {
         let mut config = ClientConfig::new();
         for (key, value) in properties {
             config.set(key, value);
@@ -21,6 +26,7 @@ impl KafkaLog {
         config.set("bootstrap.servers", bootstrap_servers);
         Ok(Self {
             consumer: config.create()?,
+            metadata_timeout: timeouts.kafka_metadata,
         })
     }
 
@@ -28,7 +34,7 @@ impl KafkaLog {
         for checkpoint in checkpoints {
             let metadata = self
                 .consumer
-                .fetch_metadata(Some(&checkpoint.topic), Duration::from_secs(15))?;
+                .fetch_metadata(Some(&checkpoint.topic), self.metadata_timeout)?;
             let [topic] = metadata.topics() else {
                 bail!(
                     "Kafka did not return exactly one topic: {}",
@@ -48,7 +54,7 @@ impl KafkaLog {
                 let (low, high) = self.consumer.fetch_watermarks(
                     &checkpoint.topic,
                     partition,
-                    Duration::from_secs(15),
+                    self.metadata_timeout,
                 )?;
                 verify_watermarks(
                     &checkpoint.topic,

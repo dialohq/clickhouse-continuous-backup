@@ -99,9 +99,10 @@ The recovery command requires `CONNECT_URL`, `CLICKHOUSE_URL`,
 `CLICKHOUSE_USERNAME`, `CLICKHOUSE_PASSWORD`, `CONNECTOR_NAMES`,
 `EXPECTED_BACKUP_NAME`, `RECOVERY_MANIFEST_FILE`, and
 `STOP_TIMEOUT_SECONDS`, plus `KAFKA_BOOTSTRAP_SERVERS` and optional
-`KAFKA_PROPERTIES_FILE`. Before it touches Kafka Connect, it reads every restored
-KeeperMap table, requires exact logical equality with the manifest, and proves
-that every exact replay offset remains in Kafka.
+`KAFKA_PROPERTIES_FILE`. `RUNTIME_TIMEOUTS` must contain the JSON value rendered
+by the chart's `timeouts` settings. Before it touches Kafka Connect, it reads
+every restored KeeperMap table, requires exact logical equality with the
+manifest, and proves that every exact replay offset remains in Kafka.
 It then patches the exact derived offsets through Kafka Connect's standard
 offset API and reads them back for equality. It never resumes a connector. A
 partial API failure leaves all connectors stopped and is safe to retry.

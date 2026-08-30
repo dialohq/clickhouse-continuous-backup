@@ -128,6 +128,9 @@
         }
         expect_rejected --set-string 'pipelines[0].connectorConfig.exactlyOnce=false'
         expect_rejected --set backup.pauseTimeoutSeconds=0
+        expect_rejected --set backup.activeDeadlineSeconds=0
+        expect_rejected --set backup.terminationGracePeriodSeconds=15
+        expect_rejected --set timeouts.kafkaTransactionSeconds=0
         expect_rejected --set-string "backup.pathPrefix=invalid')"
         expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
         expect_rejected --set-string 'pipelines[1].name=events' \
@@ -146,6 +149,9 @@
         grep -F 'BACKUP_PIPELINES' rendered.yaml >/dev/null
         grep -F 'MAX_INCREMENTALS_PER_FULL' rendered.yaml >/dev/null
         grep -F 'KAFKA_RECOVERY_TOPIC' rendered.yaml >/dev/null
+        grep -F 'RUNTIME_TIMEOUTS' rendered.yaml >/dev/null
+        grep -F 'activeDeadlineSeconds: 21600' rendered.yaml >/dev/null
+        grep -F 'activeDeadlineSeconds: 600' rendered.yaml >/dev/null
         grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F '.recovery-points' rendered.yaml >/dev/null

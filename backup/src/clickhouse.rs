@@ -1,10 +1,11 @@
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 
-use crate::model::{BackupDetails, KeeperRow, Pipeline};
+use crate::{
+    config::RuntimeTimeouts,
+    model::{BackupDetails, KeeperRow, Pipeline},
+};
 
 #[derive(Debug, serde::Deserialize)]
 struct TableEngine {
@@ -28,10 +29,15 @@ pub struct ClickHouse {
 }
 
 impl ClickHouse {
-    pub fn new(url: String, username: String, password: String) -> Result<Self> {
+    pub fn new(
+        url: String,
+        username: String,
+        password: String,
+        timeouts: &RuntimeTimeouts,
+    ) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
+                .connect_timeout(timeouts.clickhouse_connect)
                 .build()?,
             url,
             username,

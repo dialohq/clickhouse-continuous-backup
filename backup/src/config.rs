@@ -1,9 +1,53 @@
 use std::{collections::HashMap, env, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use serde::de::DeserializeOwned;
+use serde::{
+    Deserialize, Deserializer,
+    de::{DeserializeOwned, Error as _},
+};
 
 use crate::model::{Pipeline, kafka_name};
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeTimeouts {
+    #[serde(
+        rename = "clickhouseConnectSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub clickhouse_connect: Duration,
+    #[serde(
+        rename = "connectConnectSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub connect_connect: Duration,
+    #[serde(
+        rename = "connectRequestSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub connect_request: Duration,
+    #[serde(rename = "connectPollSeconds", deserialize_with = "positive_seconds")]
+    pub connect_poll: Duration,
+    #[serde(rename = "kafkaMetadataSeconds", deserialize_with = "positive_seconds")]
+    pub kafka_metadata: Duration,
+    #[serde(
+        rename = "kafkaCatalogAcquireSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub kafka_catalog_acquire: Duration,
+    #[serde(
+        rename = "kafkaCatalogReadSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub kafka_catalog_read: Duration,
+    #[serde(
+        rename = "kafkaTransactionSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub kafka_transaction: Duration,
+    #[serde(rename = "kafkaMaxPollSeconds", deserialize_with = "positive_seconds")]
+    pub kafka_max_poll: Duration,
+}
 
 #[derive(Clone, Debug)]
 pub struct BackupConfig {
@@ -23,6 +67,7 @@ pub struct BackupConfig {
     pub recovery_topic: String,
     pub max_incrementals_per_full: u32,
     pub pipelines: Vec<Pipeline>,
+    pub timeouts: RuntimeTimeouts,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +82,7 @@ pub struct RestoreConfig {
     pub stop_timeout: Duration,
     pub kafka_bootstrap_servers: String,
     pub kafka_properties_file: Option<PathBuf>,
+    pub timeouts: RuntimeTimeouts,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +91,23 @@ pub struct TargetConfig {
     pub clickhouse_username: String,
     pub clickhouse_password: String,
     pub pipelines: Vec<Pipeline>,
+    pub timeouts: RuntimeTimeouts,
+}
+
+impl RuntimeTimeouts {
+    fn from_environment() -> Result<Self> {
+        json("RUNTIME_TIMEOUTS")
+    }
+}
+
+fn positive_seconds<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Duration, D::Error> {
+    let seconds = u64::deserialize(deserializer)?;
+    if seconds == 0 {
+        return Err(D::Error::custom("timeout must be a positive integer"));
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 impl BackupConfig {
@@ -93,6 +156,7 @@ impl BackupConfig {
             recovery_topic: required("KAFKA_RECOVERY_TOPIC")?,
             max_incrementals_per_full: unsigned("MAX_INCREMENTALS_PER_FULL")?,
             pipelines,
+            timeouts: RuntimeTimeouts::from_environment()?,
         })
     }
 
@@ -125,6 +189,7 @@ impl RestoreConfig {
             stop_timeout: seconds("STOP_TIMEOUT_SECONDS")?,
             kafka_bootstrap_servers: required("KAFKA_BOOTSTRAP_SERVERS")?,
             kafka_properties_file: optional("KAFKA_PROPERTIES_FILE").map(PathBuf::from),
+            timeouts: RuntimeTimeouts::from_environment()?,
         })
     }
 
@@ -159,6 +224,7 @@ impl TargetConfig {
             clickhouse_username,
             clickhouse_password,
             pipelines,
+            timeouts: RuntimeTimeouts::from_environment()?,
         })
     }
 }
@@ -253,4 +319,38 @@ fn parse_property(line: &str) -> Result<(String, String)> {
         .split_once(['=', ':'])
         .with_context(|| format!("invalid property: {line}"))?;
     Ok((key.trim().to_owned(), value.trim().to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeTimeouts;
+
+    const VALID: &str = r#"{
+        "clickhouseConnectSeconds": 10,
+        "connectConnectSeconds": 5,
+        "connectRequestSeconds": 15,
+        "connectPollSeconds": 1,
+        "kafkaMetadataSeconds": 15,
+        "kafkaCatalogAcquireSeconds": 30,
+        "kafkaCatalogReadSeconds": 15,
+        "kafkaTransactionSeconds": 30,
+        "kafkaMaxPollSeconds": 86400
+    }"#;
+
+    #[test]
+    fn accepts_complete_positive_timeout_contract() {
+        assert!(serde_json::from_str::<RuntimeTimeouts>(VALID).is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_missing_and_unknown_timeout_values() {
+        let zero = VALID.replace("\"connectPollSeconds\": 1", "\"connectPollSeconds\": 0");
+        assert!(serde_json::from_str::<RuntimeTimeouts>(&zero).is_err());
+        assert!(serde_json::from_str::<RuntimeTimeouts>("{}").is_err());
+        let unknown = VALID.replace(
+            "\"clickhouseConnectSeconds\": 10,",
+            "\"unknownSeconds\": 1, \"clickhouseConnectSeconds\": 10,",
+        );
+        assert!(serde_json::from_str::<RuntimeTimeouts>(&unknown).is_err());
+    }
 }

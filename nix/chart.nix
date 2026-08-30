@@ -48,12 +48,30 @@ let
         replicas: 2
         tasksMax: 1
         deleteConnectorsOnUninstall: true
+        readinessProbe:
+          periodSeconds: 5
+          failureThreshold: 30
+        livenessProbe:
+          initialDelaySeconds: 30
+          periodSeconds: 15
         resources:
           requests:
             cpu: 250m
             memory: 512Mi
           limits:
             memory: 2Gi
+
+      timeouts:
+        clickhouseConnectSeconds: 10
+        connectConnectSeconds: 5
+        connectRequestSeconds: 15
+        connectPollSeconds: 1
+        kafkaMetadataSeconds: 15
+        kafkaCatalogAcquireSeconds: 30
+        kafkaCatalogReadSeconds: 15
+        kafkaTransactionSeconds: 30
+        kafkaMaxPollSeconds: 86400
+        hookJobSeconds: 600
 
       topics:
         manage: true
@@ -68,6 +86,8 @@ let
         archiveExtension: tar.zst
         maxIncrementalsPerFull: 0
         pauseTimeoutSeconds: 120
+        activeDeadlineSeconds: 21600
+        terminationGracePeriodSeconds: 300
         recoveryTopic: ""
         kafkaPropertiesKey: librdkafka.properties
         credentialsSecret:
@@ -92,7 +112,7 @@ let
     "values.schema.json" = builtins.toJSON {
       "$schema" = "https://json-schema.org/draft/2020-12/schema";
       type = "object";
-      required = ["kafka" "clickhouse" "pipelines"];
+      required = ["kafka" "clickhouse" "timeouts" "pipelines"];
       properties = {
         stateNamespace = {type = "string"; pattern = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"; maxLength = 30;};
         kafka = {
@@ -143,6 +163,33 @@ let
             };
           };
         };
+        timeouts = {
+          type = "object";
+          required = [
+            "clickhouseConnectSeconds"
+            "connectConnectSeconds"
+            "connectRequestSeconds"
+            "connectPollSeconds"
+            "kafkaMetadataSeconds"
+            "kafkaCatalogAcquireSeconds"
+            "kafkaCatalogReadSeconds"
+            "kafkaTransactionSeconds"
+            "kafkaMaxPollSeconds"
+            "hookJobSeconds"
+          ];
+          properties = {
+            clickhouseConnectSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            connectConnectSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            connectRequestSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            connectPollSeconds = {type = "integer"; minimum = 1; maximum = 300;};
+            kafkaMetadataSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            kafkaCatalogAcquireSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            kafkaCatalogReadSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            kafkaTransactionSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            kafkaMaxPollSeconds = {type = "integer"; minimum = 1; maximum = 604800;};
+            hookJobSeconds = {type = "integer"; minimum = 1; maximum = 86400;};
+          };
+        };
         backup = {
           type = "object";
           properties = {
@@ -154,6 +201,8 @@ let
             archiveExtension = {type = "string"; enum = ["tar.zst" "tar.gz" "tar.xz" "tar.bz2" "tgz" "tzst"];};
             maxIncrementalsPerFull = {type = "integer"; minimum = 0; maximum = 9999;};
             pauseTimeoutSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            activeDeadlineSeconds = {type = "integer"; minimum = 1; maximum = 604800;};
+            terminationGracePeriodSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             recoveryTopic = {type = "string"; pattern = "^$|^[A-Za-z0-9._-]+$"; maxLength = 249;};
             kafkaPropertiesKey = {type = "string"; minLength = 1;};
             credentialsSecret = {
@@ -254,6 +303,19 @@ let
       {{- define "durable-clickhouse-sink.recoveryTopic" -}}
       {{- default (printf "%s.recovery-points" (include "durable-clickhouse-sink.fullname" .)) .Values.backup.recoveryTopic -}}
       {{- end }}
+
+      {{- define "durable-clickhouse-sink.runtimeTimeouts" -}}
+      {{- toJson (dict
+        "clickhouseConnectSeconds" .Values.timeouts.clickhouseConnectSeconds
+        "connectConnectSeconds" .Values.timeouts.connectConnectSeconds
+        "connectRequestSeconds" .Values.timeouts.connectRequestSeconds
+        "connectPollSeconds" .Values.timeouts.connectPollSeconds
+        "kafkaMetadataSeconds" .Values.timeouts.kafkaMetadataSeconds
+        "kafkaCatalogAcquireSeconds" .Values.timeouts.kafkaCatalogAcquireSeconds
+        "kafkaCatalogReadSeconds" .Values.timeouts.kafkaCatalogReadSeconds
+        "kafkaTransactionSeconds" .Values.timeouts.kafkaTransactionSeconds
+        "kafkaMaxPollSeconds" .Values.timeouts.kafkaMaxPollSeconds) -}}
+      {{- end }}
     '';
 
     "templates/validate.yaml" = ''
@@ -277,6 +339,10 @@ let
       {{- end }}
       {{- if and .Values.backup.enabled (not .Values.backup.credentialsSecret.name) }}
       {{- fail "backup.credentialsSecret.name is required when backups are enabled" }}
+      {{- end }}
+      {{- $minimumResumeGrace := mul (len .Values.pipelines) (int .Values.timeouts.connectRequestSeconds) }}
+      {{- if le (int .Values.backup.terminationGracePeriodSeconds) (int $minimumResumeGrace) }}
+      {{- fail "backup.terminationGracePeriodSeconds must exceed connectRequestSeconds multiplied by the pipeline count" }}
       {{- end }}
       {{- range $segment := splitList "/" (trimSuffix "/" .Values.backup.pathPrefix) }}
       {{- if or (eq $segment "") (eq $segment ".") (eq $segment "..") }}
@@ -414,12 +480,12 @@ let
                     containerPort: 8083
                 readinessProbe:
                   httpGet: {path: /, port: http}
-                  periodSeconds: 5
-                  failureThreshold: 30
+                  periodSeconds: {{ .Values.connect.readinessProbe.periodSeconds }}
+                  failureThreshold: {{ .Values.connect.readinessProbe.failureThreshold }}
                 livenessProbe:
                   httpGet: {path: /, port: http}
-                  initialDelaySeconds: 30
-                  periodSeconds: 15
+                  initialDelaySeconds: {{ .Values.connect.livenessProbe.initialDelaySeconds }}
+                  periodSeconds: {{ .Values.connect.livenessProbe.periodSeconds }}
                 resources:
                   {{- toYaml .Values.connect.resources | nindent 18 }}
                 volumeMounts:
@@ -462,6 +528,7 @@ let
           helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
       spec:
         backoffLimit: 6
+        activeDeadlineSeconds: {{ $.Values.timeouts.hookJobSeconds }}
         template:
           metadata:
             labels:
@@ -529,6 +596,7 @@ let
           helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
       spec:
         backoffLimit: 6
+        activeDeadlineSeconds: {{ .Values.timeouts.hookJobSeconds }}
         template:
           metadata:
             labels:
@@ -615,6 +683,7 @@ let
           helm.sh/hook-delete-policy: before-hook-creation
       spec:
         backoffLimit: 6
+        activeDeadlineSeconds: {{ $.Values.timeouts.hookJobSeconds }}
         template:
           metadata:
             labels:
@@ -636,6 +705,8 @@ let
                     value: /etc/clickhouse/clickhouse.properties
                   - name: BACKUP_PIPELINES
                     value: {{ include "durable-clickhouse-sink.backupPipelines" $ | quote }}
+                  - name: RUNTIME_TIMEOUTS
+                    value: {{ include "durable-clickhouse-sink.runtimeTimeouts" $ | quote }}
                 volumeMounts:
                   - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
             containers:
@@ -646,8 +717,13 @@ let
                 args:
                   - |
                     endpoint="http://{{ include "durable-clickhouse-sink.fullname" $ }}-connect:8083"
-                    until curl --silent --fail "$endpoint/connector-plugins" >/dev/null; do sleep 2; done
-                    curl --fail-with-body --request PUT --header 'Content-Type: application/json' --data-binary @/connector/config.json "$endpoint/connectors/{{ $name }}/config"
+                    curl_options=(--connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS")
+                    until curl "''${curl_options[@]}" --silent --fail "$endpoint/connector-plugins" >/dev/null; do sleep "$POLL_SECONDS"; done
+                    curl "''${curl_options[@]}" --fail-with-body --request PUT --header 'Content-Type: application/json' --data-binary @/connector/config.json "$endpoint/connectors/{{ $name }}/config"
+                env:
+                  - {name: CONNECT_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectConnectSeconds | quote }}}
+                  - {name: REQUEST_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectRequestSeconds | quote }}}
+                  - {name: POLL_SECONDS, value: {{ $.Values.timeouts.connectPollSeconds | quote }}}
                 volumeMounts:
                   - {name: connector, mountPath: /connector, readOnly: true}
                   - {name: tmp, mountPath: /tmp}
@@ -675,6 +751,7 @@ let
           helm.sh/hook: pre-delete
           helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
       spec:
+        activeDeadlineSeconds: {{ $.Values.timeouts.hookJobSeconds }}
         template:
           metadata:
             labels:
@@ -690,7 +767,10 @@ let
                 imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
                 command: ["/bin/bash", "-euc"]
                 args:
-                  - curl --silent --show-error --request DELETE "http://{{ include "durable-clickhouse-sink.fullname" $ }}-connect:8083/connectors/{{ $name }}" || true
+                  - curl --connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS" --silent --show-error --request DELETE "http://{{ include "durable-clickhouse-sink.fullname" $ }}-connect:8083/connectors/{{ $name }}" || true
+                env:
+                  - {name: CONNECT_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectConnectSeconds | quote }}}
+                  - {name: REQUEST_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectRequestSeconds | quote }}}
                 volumeMounts:
                   - {name: tmp, mountPath: /tmp}
             volumes:
@@ -718,6 +798,7 @@ let
         jobTemplate:
           spec:
             backoffLimit: 1
+            activeDeadlineSeconds: {{ .Values.backup.activeDeadlineSeconds }}
             template:
               metadata:
                 labels:
@@ -726,7 +807,7 @@ let
               spec:
                 restartPolicy: Never
                 automountServiceAccountToken: false
-                terminationGracePeriodSeconds: 60
+                terminationGracePeriodSeconds: {{ .Values.backup.terminationGracePeriodSeconds }}
                 securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
                 containers:
                   - name: backup
@@ -751,6 +832,7 @@ let
                       - {name: PAUSE_TIMEOUT_SECONDS, value: {{ .Values.backup.pauseTimeoutSeconds | quote }}}
                       - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
                       - {name: KAFKA_RECOVERY_TOPIC, value: {{ include "durable-clickhouse-sink.recoveryTopic" . | quote }}}
+                      - {name: RUNTIME_TIMEOUTS, value: {{ include "durable-clickhouse-sink.runtimeTimeouts" . | quote }}}
                       {{- if .Values.kafka.existingSecret }}
                       - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka-recovery/client.properties}
                       {{- end }}

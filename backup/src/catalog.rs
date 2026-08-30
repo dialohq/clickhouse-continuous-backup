@@ -7,10 +7,16 @@ use rdkafka::{
     producer::{FutureProducer, FutureRecord, Producer},
 };
 
+use crate::config::RuntimeTimeouts;
+
 pub struct Catalog {
     producer: FutureProducer,
     consumer: StreamConsumer,
     topic: String,
+    acquire_timeout: Duration,
+    metadata_timeout: Duration,
+    read_timeout: Duration,
+    transaction_timeout: Duration,
 }
 
 impl Catalog {
@@ -19,6 +25,7 @@ impl Catalog {
         properties: &HashMap<String, String>,
         topic: String,
         run_id: &str,
+        timeouts: &RuntimeTimeouts,
     ) -> Result<Self> {
         let lock_group = format!("{topic}.backup-lock");
         if lock_group.len() > 255 {
@@ -44,19 +51,26 @@ impl Catalog {
             .set("enable.auto.commit", "false")
             .set("isolation.level", "read_committed")
             .set("enable.partition.eof", "true")
-            .set("max.poll.interval.ms", "86400000")
+            .set(
+                "max.poll.interval.ms",
+                timeouts.kafka_max_poll.as_millis().to_string(),
+            )
             .create()?;
         Ok(Self {
             producer,
             consumer,
             topic,
+            acquire_timeout: timeouts.kafka_catalog_acquire,
+            metadata_timeout: timeouts.kafka_metadata,
+            read_timeout: timeouts.kafka_catalog_read,
+            transaction_timeout: timeouts.kafka_transaction,
         })
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<String>> {
         let metadata = self
             .consumer
-            .fetch_metadata(Some(&self.topic), Duration::from_secs(15))?;
+            .fetch_metadata(Some(&self.topic), self.metadata_timeout)?;
         let [topic] = metadata.topics() else {
             bail!("Kafka did not return exactly one recovery topic")
         };
@@ -67,12 +81,12 @@ impl Catalog {
             bail!("the recovery topic must have exactly one partition")
         }
         self.consumer.subscribe(&[&self.topic])?;
-        let first = tokio::time::timeout(Duration::from_secs(30), self.consumer.recv())
+        let first = tokio::time::timeout(self.acquire_timeout, self.consumer.recv())
             .await
             .context("timed out acquiring the backup lock")?;
-        let (low, high) =
-            self.consumer
-                .fetch_watermarks(&self.topic, 0, Duration::from_secs(15))?;
+        let (low, high) = self
+            .consumer
+            .fetch_watermarks(&self.topic, 0, self.metadata_timeout)?;
         if low < 0 || high < low {
             bail!("Kafka returned invalid recovery-topic watermarks: {low}..{high}")
         }
@@ -84,7 +98,7 @@ impl Catalog {
             Err(error) => return Err(error.into()),
         }
         loop {
-            match tokio::time::timeout(Duration::from_secs(15), self.consumer.recv()).await {
+            match tokio::time::timeout(self.read_timeout, self.consumer.recv()).await {
                 Ok(Ok(message)) => {
                     if inspect(&message, key, high, &mut value) {
                         break;
@@ -102,7 +116,7 @@ impl Catalog {
         if records.is_empty() {
             bail!("at least one recovery catalog record is required")
         }
-        self.producer.init_transactions(Duration::from_secs(30))?;
+        self.producer.init_transactions(self.transaction_timeout)?;
         self.producer.begin_transaction()?;
         for &(key, value) in records {
             if let Err((error, _)) = self
@@ -112,17 +126,17 @@ impl Catalog {
                         .partition(0)
                         .key(key)
                         .payload(value),
-                    Duration::from_secs(30),
+                    self.transaction_timeout,
                 )
                 .await
             {
                 self.producer
-                    .abort_transaction(Duration::from_secs(30))
+                    .abort_transaction(self.transaction_timeout)
                     .ok();
                 return Err(error).context("failed to publish recovery catalog record");
             }
         }
-        self.producer.commit_transaction(Duration::from_secs(30))?;
+        self.producer.commit_transaction(self.transaction_timeout)?;
         Ok(())
     }
 }

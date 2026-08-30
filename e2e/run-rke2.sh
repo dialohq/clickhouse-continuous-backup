@@ -303,6 +303,8 @@ restore_clickhouse "RESTORE TABLE durable_e2e.events FROM $backup"
 
 connector_request PUT /stop
 wait_connector_state STOPPED
+runtime_timeouts=$(k -n "$namespace" get cronjob/sink-durable-clickhouse-sink-backup -o json |
+  jq -r '.spec.jobTemplate.spec.template.spec.containers[0].env[] | select(.name == "RUNTIME_TIMEOUTS").value')
 apply_recovery() {
   local recovery_manifest=$1 expected_backup=$2
   printf '%s\n' "$recovery_manifest" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
@@ -316,6 +318,7 @@ apply_recovery() {
       RECOVERY_MANIFEST_FILE=- \
       STOP_TIMEOUT_SECONDS=120 \
       KAFKA_BOOTSTRAP_SERVERS=redpanda:9092 \
+      RUNTIME_TIMEOUTS="$runtime_timeouts" \
       /bin/durable-clickhouse-recovery restore-offsets
 }
 
