@@ -287,6 +287,7 @@ mod tests {
     fn crd_requires_an_immutable_spec() {
         let mut crd = serde_json::to_value(TableRecovery::crd()).unwrap();
         add_immutability_rule(&mut crd).unwrap();
+        assert_eq!(crd["spec"]["group"], "chbackup.dialo.ai");
         let rules = crd
             .pointer(
                 "/spec/versions/0/schema/openAPIV3Schema/properties/spec/x-kubernetes-validations",
