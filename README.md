@@ -14,12 +14,6 @@ The official ClickHouse connector uses deterministic retries and KeeperMap
 state at the Kafka-to-ClickHouse boundary. Target tables can remain ordinary
 `MergeTree` or `ReplicatedMergeTree` tables and do not need query-time `FINAL`.
 
-Logical event deduplication is deliberately out of scope. Deploy the independent
-[Kafka Event Deduplicator](https://github.com/dialohq/kafka-event-deduplicator)
-upstream when producers may submit the same event more than once. The projects
-share only a Kafka topic contract and can be installed, upgraded, and tested
-separately.
-
 ## Requirements
 
 - a Kafka-protocol-compatible cluster;
@@ -54,14 +48,14 @@ clickhouse:
   host: clickhouse.example.internal
   port: 8443
   secure: true
-  database: durable_events
+  database: durable_data
   credentialsSecret:
     name: durable-clickhouse-writer
 
 pipelines:
-  - name: events
-    topic: durable.events.canonical
-    table: events
+  - name: records
+    topic: durable.records
+    table: records
     retentionMs: 7776000000
 ```
 
@@ -73,7 +67,7 @@ backup:
   enabled: true
   schedule: "17 2 * * *"
   namedCollection: durable_clickhouse_backups
-  pathPrefix: durable-events/production
+  pathPrefix: durable-data/production
   maxIncrementalsPerFull: 6
   credentialsSecret:
     name: durable-clickhouse-backup
@@ -87,7 +81,7 @@ size; the recovery binary does not carry fallback durations of its own.
 
 Each backup Job verifies the connector tasks, pauses and drains them, snapshots
 their KeeperMap state, creates and verifies a direct S3 backup, and publishes a
-recovery-point manifest to a compacted Kafka topic. Event tables use one full
+recovery-point manifest to a compacted Kafka topic. Target tables use one full
 backup followed by at most `maxIncrementalsPerFull` incremental backups. Every
 point also contains an independent full KeeperMap checkpoint. The safe default
 is `0`, which creates only full backups.
@@ -101,9 +95,10 @@ routine Helm change.
 - [Architecture and failure boundaries](docs/architecture.md)
 - [Guarantees](docs/guarantees.md)
 - [Failure modes and unhandled boundaries](docs/failure-modes.md)
-- [Schema and event contract](docs/schema.md)
+- [Schema contract](docs/schema.md)
 - [Authentication and credential rotation](docs/authentication.md)
 - [Backup and recovery](docs/recovery.md)
+- [Backup procedure](docs/backup-procedure.md)
 - [Test plan](docs/testing.md)
 - [External design references](docs/references.md)
 

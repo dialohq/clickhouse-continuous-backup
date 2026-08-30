@@ -11,10 +11,10 @@ use crate::{
     connect::{Connect, validate_offsets},
     kafka::KafkaLog,
     model::{
-        BackupDependency, BackupKind, BackupOutput, BackupReference, CHAIN_HEAD_FORMAT,
-        CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue,
-        KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline, RECOVERY_POINT_FORMAT,
-        RecoveryPoint, kafka_name,
+        BackupDependency, BackupDetails, BackupKind, BackupOutput, BackupReference,
+        CHAIN_HEAD_FORMAT, CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset,
+        KafkaOffsetValue, KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline,
+        RECOVERY_POINT_FORMAT, RecoveryPoint, kafka_name,
     },
 };
 
@@ -26,6 +26,13 @@ struct BackupPlan {
     chain_base: Option<BackupReference>,
     generation: u64,
     pipelines: Vec<Pipeline>,
+}
+
+struct CreatedArchives {
+    target: BackupReference,
+    target_details: BackupDetails,
+    checkpoint: BackupDependency,
+    checkpoint_details: BackupDetails,
 }
 
 pub async fn run() -> Result<()> {
@@ -60,7 +67,7 @@ pub async fn run() -> Result<()> {
         &config.pipelines,
     );
 
-    let operation = execute(&config, &connect, &catalog, &plan);
+    let operation = create_recovery_point(&config, &connect, &catalog, &plan);
     tokio::pin!(operation);
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -78,12 +85,40 @@ pub async fn run() -> Result<()> {
     }
 }
 
-async fn execute(
+async fn create_recovery_point(
     config: &BackupConfig,
     connect: &Connect,
     catalog: &Catalog,
     plan: &BackupPlan,
 ) -> Result<()> {
+    pause_delivery(config, connect).await?;
+    let clickhouse = ClickHouse::new(
+        config.clickhouse_url.clone(),
+        config.clickhouse_username.clone(),
+        config.clickhouse_password.clone(),
+        &config.timeouts,
+    )?;
+    clickhouse.require_backup_engines(&config.pipelines).await?;
+    let kafka = KafkaLog::new(
+        &config.kafka_bootstrap_servers,
+        &config.kafka_properties()?,
+        &config.timeouts,
+    )?;
+
+    let checkpoints = capture_checkpoints(config, connect, &clickhouse).await?;
+    kafka.verify(&checkpoints)?;
+    let archives = create_archives(config, &clickhouse, plan).await?;
+    require_stable_checkpoint(config, connect, &clickhouse, &checkpoints).await?;
+
+    let recovery_point = build_recovery_point(&archives, checkpoints);
+    validate_recovery_point(&recovery_point)?;
+    kafka.verify(&recovery_point.connectors)?;
+    commit_recovery_point(catalog, plan, &recovery_point).await?;
+    print_output(&archives, &recovery_point)?;
+    Ok(())
+}
+
+async fn pause_delivery(config: &BackupConfig, connect: &Connect) -> Result<()> {
     for pipeline in &config.pipelines {
         connect.pause(&pipeline.connector).await?;
     }
@@ -92,14 +127,14 @@ async fn execute(
             .wait_paused(&pipeline.connector, config.pause_timeout)
             .await?;
     }
+    Ok(())
+}
 
-    let clickhouse = ClickHouse::new(
-        config.clickhouse_url.clone(),
-        config.clickhouse_username.clone(),
-        config.clickhouse_password.clone(),
-        &config.timeouts,
-    )?;
-    clickhouse.require_backup_engines(&config.pipelines).await?;
+async fn capture_checkpoints(
+    config: &BackupConfig,
+    connect: &Connect,
+    clickhouse: &ClickHouse,
+) -> Result<Vec<ConnectorCheckpoint>> {
     let mut checkpoints = Vec::with_capacity(config.pipelines.len());
     for pipeline in &config.pipelines {
         let observed = connect.offsets(&pipeline.connector).await?;
@@ -108,15 +143,16 @@ async fn execute(
             .await?;
         checkpoints.push(checkpoint(pipeline, observed, rows)?);
     }
-    let kafka = KafkaLog::new(
-        &config.kafka_bootstrap_servers,
-        &config.kafka_properties()?,
-        &config.timeouts,
-    )?;
-    kafka.verify(&checkpoints)?;
+    Ok(checkpoints)
+}
 
+async fn create_archives(
+    config: &BackupConfig,
+    clickhouse: &ClickHouse,
+    plan: &BackupPlan,
+) -> Result<CreatedArchives> {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let path = match plan.kind {
+    let target_path = match plan.kind {
         BackupKind::Full => format!(
             "{}/chains/{}/base-{}-{}.{}",
             config.path_prefix, plan.chain_id, stamp, config.run_id, config.archive_extension
@@ -131,15 +167,17 @@ async fn execute(
             config.archive_extension
         ),
     };
-    let destination = format!("S3({}, '{}')", config.named_collection, path);
-    let (id, _) = clickhouse
+    let target_destination = format!("S3({}, '{}')", config.named_collection, target_path);
+    let (target_id, _) = clickhouse
         .create_backup(
             &config.backup_objects,
-            &destination,
+            &target_destination,
             plan.base.as_ref().map(|backup| backup.name.as_str()),
         )
         .await?;
-    let details = clickhouse.backup_details(id, &destination).await?;
+    let target_details = clickhouse
+        .backup_details(target_id, &target_destination)
+        .await?;
     let checkpoint_path = format!(
         "{}/chains/{}/checkpoint-{:04}-{}-{}.{}",
         config.path_prefix,
@@ -156,7 +194,34 @@ async fn execute(
     let checkpoint_details = clickhouse
         .backup_details(checkpoint_id, &checkpoint_destination)
         .await?;
-    for (pipeline, checkpoint) in config.pipelines.iter().zip(&checkpoints) {
+    Ok(CreatedArchives {
+        target: BackupReference {
+            id: target_id,
+            name: target_destination,
+            kind: plan.kind.clone(),
+            chain_id: plan.chain_id.clone(),
+            position: plan.position,
+            base: plan.base.as_ref().map(|backup| BackupDependency {
+                id: backup.id,
+                name: backup.name.clone(),
+            }),
+        },
+        target_details,
+        checkpoint: BackupDependency {
+            id: checkpoint_id,
+            name: checkpoint_destination,
+        },
+        checkpoint_details,
+    })
+}
+
+async fn require_stable_checkpoint(
+    config: &BackupConfig,
+    connect: &Connect,
+    clickhouse: &ClickHouse,
+    checkpoints: &[ConnectorCheckpoint],
+) -> Result<()> {
+    for (pipeline, checkpoint) in config.pipelines.iter().zip(checkpoints) {
         connect
             .wait_paused(&pipeline.connector, config.pause_timeout)
             .await?;
@@ -165,41 +230,45 @@ async fn execute(
             .await?;
         require_unchanged_keeper(checkpoint, current)?;
     }
-    let backup = BackupReference {
-        id,
-        name: destination,
-        kind: plan.kind.clone(),
-        chain_id: plan.chain_id.clone(),
-        position: plan.position,
-        base: plan.base.as_ref().map(|backup| BackupDependency {
-            id: backup.id,
-            name: backup.name.clone(),
-        }),
-    };
-    let recovery_point = RecoveryPoint {
+    Ok(())
+}
+
+fn build_recovery_point(
+    archives: &CreatedArchives,
+    connectors: Vec<ConnectorCheckpoint>,
+) -> RecoveryPoint {
+    RecoveryPoint {
         format: RECOVERY_POINT_FORMAT.to_owned(),
         created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        backup: backup.clone(),
-        checkpoint_backup: BackupDependency {
-            id: checkpoint_id,
-            name: checkpoint_destination,
-        },
-        connectors: checkpoints,
-    };
-    validate_recovery_point(&recovery_point)?;
-    kafka.verify(&recovery_point.connectors)?;
-    let head = next_head(plan, backup);
+        backup: archives.target.clone(),
+        checkpoint_backup: archives.checkpoint.clone(),
+        connectors,
+    }
+}
+
+/// Publishes the manifest and chain head atomically; this is the backup's commit point.
+async fn commit_recovery_point(
+    catalog: &Catalog,
+    plan: &BackupPlan,
+    recovery_point: &RecoveryPoint,
+) -> Result<()> {
+    let head = next_head(plan, recovery_point.backup.clone());
     let manifest = serde_json::to_string(&recovery_point)?;
     let head_value = serde_json::to_string(&head)?;
+    let backup_id = recovery_point.backup.id.to_string();
     catalog
-        .publish(&[(&id.to_string(), &manifest), (CHAIN_HEAD_KEY, &head_value)])
+        .publish(&[(&backup_id, &manifest), (CHAIN_HEAD_KEY, &head_value)])
         .await?;
+    Ok(())
+}
+
+fn print_output(archives: &CreatedArchives, recovery_point: &RecoveryPoint) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&BackupOutput {
-            details: &details,
-            checkpoint_details: &checkpoint_details,
-            recovery_point: &recovery_point
+            details: &archives.target_details,
+            checkpoint_details: &archives.checkpoint_details,
+            recovery_point
         })?
     );
     Ok(())
@@ -595,11 +664,11 @@ mod tests {
 
     fn pipeline() -> Pipeline {
         Pipeline {
-            connector: "events".to_owned(),
-            database: "events".to_owned(),
-            state_table: "events_state".to_owned(),
-            table: "events".to_owned(),
-            topic: "events.canonical".to_owned(),
+            connector: "records".to_owned(),
+            database: "records".to_owned(),
+            state_table: "records_state".to_owned(),
+            table: "records".to_owned(),
+            topic: "records.input".to_owned(),
             partitions: 3,
         }
     }
@@ -607,7 +676,7 @@ mod tests {
     fn offset(partition: u32, value: u64) -> KafkaOffset {
         KafkaOffset {
             partition: KafkaPartition {
-                kafka_topic: "events.canonical".to_owned(),
+                kafka_topic: "records.input".to_owned(),
                 kafka_partition: partition,
             },
             offset: KafkaOffsetValue {
@@ -618,7 +687,7 @@ mod tests {
 
     fn row(partition: u32, max: u64, state: &str) -> KeeperRow {
         KeeperRow {
-            key: format!("events.canonical-{partition}"),
+            key: format!("records.input-{partition}"),
             min_offset: max,
             max_offset: max,
             state: state.to_owned(),
@@ -834,14 +903,14 @@ mod tests {
                 name: "S3(backups, 'root/chains/chain/checkpoint.tar.zst')".to_owned(),
             },
             connectors: vec![ConnectorCheckpoint {
-                name: "events".to_owned(),
-                topic: "events.canonical".to_owned(),
+                name: "records".to_owned(),
+                topic: "records.input".to_owned(),
                 partitions: 3,
                 offsets: vec![offset(0, 10), offset(1, 0), offset(2, 0)],
                 observed_connect_offsets: vec![offset(0, 9)],
                 keeper: KeeperCheckpoint {
-                    database: "events".to_owned(),
-                    table: "events_state".to_owned(),
+                    database: "records".to_owned(),
+                    table: "records_state".to_owned(),
                     rows: vec![row(0, 9, "AFTER_PROCESSING")],
                 },
             }],
@@ -929,7 +998,7 @@ mod tests {
     #[test]
     fn rejects_unsafe_keeper_identity_and_range() {
         let mut point = recovery_point();
-        point.connectors[0].keeper.table = "events`; DROP DATABASE events".to_owned();
+        point.connectors[0].keeper.table = "records`; DROP DATABASE records".to_owned();
         assert!(validate_recovery_point(&point).is_err());
 
         point = recovery_point();
@@ -945,7 +1014,7 @@ mod tests {
         assert!(validate_recovery_point(&point).is_err());
 
         point = recovery_point();
-        point.connectors[0].keeper.rows[0].key = "events.canonical-1".to_owned();
+        point.connectors[0].keeper.rows[0].key = "records.input-1".to_owned();
         assert!(validate_recovery_point(&point).is_err());
     }
 }

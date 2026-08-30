@@ -1,12 +1,10 @@
 CREATE DATABASE IF NOT EXISTS durable_e2e;
 
-CREATE TABLE IF NOT EXISTS durable_e2e.events
+CREATE TABLE IF NOT EXISTS durable_e2e.records
 (
-    id String,
-    external_connection_id Nullable(String),
-    occurred_at DateTime64(3, 'UTC'),
-    source LowCardinality(String),
-    metadata String
+    record_key String,
+    recorded_at DateTime64(3, 'UTC'),
+    payload String
 )
-ENGINE = ReplicatedMergeTree('/clickhouse/tables/durable_e2e/events', '01')
-ORDER BY (occurred_at, id);
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/durable_e2e/records', '01')
+ORDER BY (recorded_at, record_key);

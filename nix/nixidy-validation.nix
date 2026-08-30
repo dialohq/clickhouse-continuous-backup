@@ -20,9 +20,9 @@
           credentialsSecret.name = "clickhouse-backup-credentials";
         };
         pipelines = [{
-          name = "events";
-          topic = "events.canonical";
-          table = "events";
+          name = "records";
+          topic = "records.input";
+          table = "records";
         }];
       };
     };

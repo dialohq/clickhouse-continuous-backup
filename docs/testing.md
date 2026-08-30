@@ -42,7 +42,7 @@ instances, MinIO, and this chart. It verifies:
    creating a backup;
 5. one full plus two incrementals are created, then the configured limit rolls
    over to a new full;
-6. event data and the independent full KeeperMap checkpoint restore on clean
+6. target data and the independent full KeeperMap checkpoint restore on clean
    ClickHouse and Keeper instances;
 7. the compacted recovery record contains exact KeeperMap-derived offsets and
    chain dependencies;

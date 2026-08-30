@@ -243,11 +243,11 @@ mod tests {
 
     fn pipeline() -> Pipeline {
         Pipeline {
-            connector: "events".to_owned(),
+            connector: "records".to_owned(),
             database: "history".to_owned(),
-            state_table: "events_state".to_owned(),
-            table: "events".to_owned(),
-            topic: "events.canonical".to_owned(),
+            state_table: "records_state".to_owned(),
+            table: "records".to_owned(),
+            topic: "records.input".to_owned(),
             partitions: 3,
         }
     }
@@ -273,8 +273,8 @@ mod tests {
             validate_engines(
                 &[pipeline()],
                 &[
-                    engine("events", "ReplicatedMergeTree"),
-                    engine("events_state", "KeeperMap")
+                    engine("records", "ReplicatedMergeTree"),
+                    engine("records_state", "KeeperMap")
                 ],
                 1000,
                 true,
@@ -288,22 +288,25 @@ mod tests {
         assert!(
             validate_engines(
                 &[pipeline()],
-                &[engine("events", "Log"), engine("events_state", "KeeperMap")],
+                &[
+                    engine("records", "Log"),
+                    engine("records_state", "KeeperMap")
+                ],
                 1000,
                 true,
             )
             .is_err()
         );
         assert!(
-            validate_engines(&[pipeline()], &[engine("events", "MergeTree")], 1000, true).is_err()
+            validate_engines(&[pipeline()], &[engine("records", "MergeTree")], 1000, true).is_err()
         );
-        let mut unsafe_merge_tree = engine("events", "MergeTree");
+        let mut unsafe_merge_tree = engine("records", "MergeTree");
         unsafe_merge_tree.create_table_query =
-            "CREATE TABLE history.events ENGINE = MergeTree".to_owned();
+            "CREATE TABLE history.records ENGINE = MergeTree".to_owned();
         assert!(
             validate_engines(
                 &[pipeline()],
-                &[unsafe_merge_tree, engine("events_state", "KeeperMap")],
+                &[unsafe_merge_tree, engine("records_state", "KeeperMap")],
                 1000,
                 true,
             )
@@ -316,7 +319,10 @@ mod tests {
         assert!(
             validate_engines(
                 &[pipeline()],
-                &[engine("events", "MergeTree"), engine("events_state", "Log")],
+                &[
+                    engine("records", "MergeTree"),
+                    engine("records_state", "Log")
+                ],
                 1000,
                 true,
             )
@@ -330,8 +336,8 @@ mod tests {
             validate_engines(
                 &[pipeline()],
                 &[
-                    engine("events", "ReplicatedMergeTree"),
-                    engine("events_state", "KeeperMap")
+                    engine("records", "ReplicatedMergeTree"),
+                    engine("records_state", "KeeperMap")
                 ],
                 0,
                 true,
@@ -345,7 +351,7 @@ mod tests {
         assert!(
             validate_engines(
                 &[pipeline()],
-                &[engine("events", "ReplicatedMergeTree")],
+                &[engine("records", "ReplicatedMergeTree")],
                 1000,
                 false,
             )

@@ -73,9 +73,9 @@
           credentialsSecret.name = "clickhouse-credentials";
         };
         pipelines = [{
-          name = "events";
-          topic = "events.canonical";
-          table = "events";
+          name = "records";
+          topic = "records.input";
+          table = "records";
           retentionMs = 3600000;
           partitions = 3;
         }];
@@ -107,9 +107,9 @@
           --set-string kafka.bootstrapServers=kafka.example:9092
           --set-string clickhouse.host=clickhouse.example
           --set-string clickhouse.credentialsSecret.name=clickhouse-credentials
-          --set-string 'pipelines[0].name=events'
-          --set-string 'pipelines[0].topic=events.canonical'
-          --set-string 'pipelines[0].table=events'
+          --set-string 'pipelines[0].name=records'
+          --set-string 'pipelines[0].topic=records.input'
+          --set-string 'pipelines[0].table=records'
           --set backup.enabled=true
           --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
         )
@@ -117,8 +117,8 @@
         helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
         helm template test ${packages.chartSource} "''${chart_args[@]}" \
           --set-string 'pipelines[1].name=other' \
-          --set-string 'pipelines[1].topic=other.canonical' \
-          --set-string 'pipelines[1].table=events' > rendered-shared-table.yaml
+          --set-string 'pipelines[1].topic=other.input' \
+          --set-string 'pipelines[1].table=records' > rendered-shared-table.yaml
 
         expect_rejected() {
           if helm template test ${packages.chartSource} "''${chart_args[@]}" "$@" >/dev/null 2>&1; then
@@ -133,9 +133,9 @@
         expect_rejected --set timeouts.kafkaTransactionSeconds=0
         expect_rejected --set-string "backup.pathPrefix=invalid')"
         expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
-        expect_rejected --set-string 'pipelines[1].name=events' \
-          --set-string 'pipelines[1].topic=other.canonical' \
-          --set-string 'pipelines[1].table=other_events'
+        expect_rejected --set-string 'pipelines[1].name=records' \
+          --set-string 'pipelines[1].topic=other.input' \
+          --set-string 'pipelines[1].table=other_records'
 
         if grep -F "Disk('" rendered.yaml; then
           echo "backup unexpectedly uses server-local Disk metadata" >&2
@@ -156,7 +156,7 @@
         grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F '.recovery-points' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
-        [[ $(grep -c 'value: "TABLE default.events"' rendered-shared-table.yaml) == 1 ]]
+        [[ $(grep -c 'value: "TABLE default.records"' rendered-shared-table.yaml) == 1 ]]
         touch $out
       '';
     });

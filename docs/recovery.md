@@ -1,54 +1,10 @@
 # Backup and recovery
 
-## Recovery-point protocol
+## Backup protocol
 
-The optional CronJob requires every managed connector and task to be `RUNNING`,
-acquires the recovery topic's single-partition consumer-group lock, pauses all
-connectors, and waits for `PAUSED`. A paused task has completed its active
-`put`, so both the target table and the connector's KeeperMap state are stable.
-
-Kafka Connect's committed offset is observational only: it can lag a completed
-ClickHouse write. The authoritative next offset for partition `p` is:
-
-```text
-KeeperMap["<input-topic>-<p>"].maxOffset + 1
-```
-
-An absent KeeperMap row means offset zero. A backup is refused if a row is not
-`AFTER_PROCESSING`, a row names a partition outside the configured range, or
-Kafka Connect reports an offset ahead of KeeperMap. It also verifies every
-derived offset against the input topic's current partition count and low/high
-watermarks both before archive creation and immediately before manifest
-publication. The versioned recovery manifest records the derived offsets, the
-observed Connect offsets, and every KeeperMap row so the relationship can be
-checked again during restore.
-
-While delivery remains paused, the Job creates two native ClickHouse backups:
-
-- the target MergeTree tables, as a full or incremental backup;
-- all connector KeeperMap tables, as an independent full checkpoint.
-
-Separating these artifacts is deliberate. MergeTree data files are immutable,
-whereas KeeperMap uses append-only files. ClickHouse issue
-[#112403](https://github.com/ClickHouse/ClickHouse/issues/112403) confirms that
-incremental backup deduplication can mishandle append-only files with different
-base coverage. Incremental mode therefore rejects non-MergeTree target engines,
-and KeeperMap never depends on an incremental base.
-
-The Job accepts each artifact only after `system.backups` confirms its exact ID,
-destination, and `BACKUP_CREATED` status. It then publishes the recovery point
-and the next chain head in one Kafka transaction. The transaction is
-`read_committed`, idempotent, and confined to the required one-partition
-compacted recovery topic. A backup is successful only after that transaction
-commits. Archives without a committed manifest are harmless orphans, not
-recovery points.
-
-All archives use unique UTC/pod-UID names beneath
-`<pathPrefix>/chains/<chain-id>/`. `maxIncrementalsPerFull=N` produces one full
-event-data backup, at most `N` incrementals, and then starts a new full chain.
-`0` is the safe full-only default. An incremental points at the immediately
-preceding event-data backup; restoring its tip follows the native ClickHouse
-dependency chain. Every dependency must remain available.
+[Backup procedure](backup-procedure.md) defines the complete ordered protocol,
+artifact ownership, commit point, failure outcomes, and corresponding Rust
+functions.
 
 The chart does not delete external object-store data. Retention must delete a
 closed `chains/<chain-id>/` prefix as a unit, never individual members of a live
@@ -79,7 +35,7 @@ KeeperMap table names, and Kafka Connect internal-topic identities.
 
 Restore into an empty ClickHouse database backed by an isolated Keeper:
 
-1. Retrieve the chosen recovery manifest by its event-data backup ID from the
+1. Retrieve the chosen recovery manifest by its target-data backup ID from the
    recovery topic.
 2. Restore the manifest's `backup.name`. ClickHouse follows its incremental
    dependencies automatically.
@@ -109,13 +65,13 @@ partial API failure leaves all connectors stopped and is safe to retry.
 
 This ordering closes the dangerous cases: restoring data without its KeeperMap
 checkpoint cannot rewind Kafka, and restoring the checkpoint while selecting a
-different event-data archive is rejected by `EXPECTED_BACKUP_NAME`.
+different target-data archive is rejected by `EXPECTED_BACKUP_NAME`.
 
 ## Drill acceptance criteria
 
 A restore drill is successful only when:
 
-- the event-data backup and independent KeeperMap checkpoint both restore;
+- the target-data backup and independent KeeperMap checkpoint both restore;
 - restored row counts and content-level aggregates match the recovery point;
 - the recovery command proves restored KeeperMap equality and exact Connect
   offset read-back;

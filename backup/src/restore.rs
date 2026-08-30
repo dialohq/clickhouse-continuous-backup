@@ -141,15 +141,15 @@ mod tests {
 
     fn checkpoint() -> ConnectorCheckpoint {
         ConnectorCheckpoint {
-            name: "events".to_owned(),
-            topic: "events.canonical".to_owned(),
+            name: "records".to_owned(),
+            topic: "records.input".to_owned(),
             partitions: 2,
             offsets: vec![],
             observed_connect_offsets: vec![],
             keeper: KeeperCheckpoint {
-                database: "events".to_owned(),
-                table: "events_state".to_owned(),
-                rows: vec![row("events.canonical-0", 10), row("events.canonical-1", 20)],
+                database: "records".to_owned(),
+                table: "records_state".to_owned(),
+                rows: vec![row("records.input-0", 10), row("records.input-1", 20)],
             },
         }
     }
@@ -160,14 +160,14 @@ mod tests {
         assert!(
             require_keeper_match(
                 &point,
-                vec![row("events.canonical-1", 20), row("events.canonical-0", 10)]
+                vec![row("records.input-1", 20), row("records.input-0", 10)]
             )
             .is_ok()
         );
         assert!(
             require_keeper_match(
                 &point,
-                vec![row("events.canonical-0", 10), row("events.canonical-1", 19)]
+                vec![row("records.input-0", 10), row("records.input-1", 19)]
             )
             .is_err()
         );

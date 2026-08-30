@@ -102,22 +102,22 @@ mod tests {
 
     #[test]
     fn accepts_offsets_inside_log_including_end() {
-        assert!(verify_watermarks("events", 0, 5, 5, 10).is_ok());
-        assert!(verify_watermarks("events", 0, 10, 5, 10).is_ok());
+        assert!(verify_watermarks("records", 0, 5, 5, 10).is_ok());
+        assert!(verify_watermarks("records", 0, 10, 5, 10).is_ok());
     }
 
     #[test]
     fn rejects_retention_loss_log_rollback_and_invalid_watermarks() {
-        assert!(verify_watermarks("events", 0, 4, 5, 10).is_err());
-        assert!(verify_watermarks("events", 0, 11, 5, 10).is_err());
-        assert!(verify_watermarks("events", 0, 5, -1, 10).is_err());
-        assert!(verify_watermarks("events", 0, 5, 10, 9).is_err());
-        assert!(verify_watermarks("events", 0, u64::MAX, 0, 10).is_err());
+        assert!(verify_watermarks("records", 0, 4, 5, 10).is_err());
+        assert!(verify_watermarks("records", 0, 11, 5, 10).is_err());
+        assert!(verify_watermarks("records", 0, 5, -1, 10).is_err());
+        assert!(verify_watermarks("records", 0, 5, 10, 9).is_err());
+        assert!(verify_watermarks("records", 0, u64::MAX, 0, 10).is_err());
     }
 
     #[test]
     fn rejects_partition_count_changes() {
-        assert!(verify_partition_count("events", 3, 3).is_ok());
-        assert!(verify_partition_count("events", 3, 4).is_err());
+        assert!(verify_partition_count("records", 3, 3).is_ok());
+        assert!(verify_partition_count("records", 3, 4).is_err());
     }
 }

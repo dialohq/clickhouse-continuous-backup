@@ -98,9 +98,9 @@ let
         failedJobsHistoryLimit: 3
 
       pipelines: []
-      # - name: events
-      #   topic: events.canonical
-      #   table: events
+      # - name: records
+      #   topic: records.input
+      #   table: records
       #   database: default
       #   retentionMs: 7776000000
       #   partitions: 6

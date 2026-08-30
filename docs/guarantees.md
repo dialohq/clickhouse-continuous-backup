@@ -10,7 +10,7 @@ the transport retry.
 
 At a recovery point, connectors are drained and paused. The manifest derives
 the next Kafka offset from the backed-up KeeperMap `maxOffset + 1`, not from a
-potentially lagging Kafka Connect commit. Event data and a full KeeperMap
+potentially lagging Kafka Connect commit. Target data and a full KeeperMap
 checkpoint are backed up separately. Recovery verifies the restored KeeperMap
 against the manifest before patching Connect and verifies Connect's read-back
 before it may be resumed.
@@ -33,7 +33,7 @@ Connect offsets.
 It does not guarantee:
 
 - durability before a producer receives a successful Kafka acknowledgement;
-- deduplication of two Kafka records that represent the same logical event;
+- deduplication of two Kafka records that represent the same logical record;
 - exactly-once side effects outside Kafka or ClickHouse;
 - recovery after loss of both ClickHouse backups and the required Kafka input
   and internal topics;

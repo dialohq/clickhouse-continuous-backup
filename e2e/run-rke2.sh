@@ -148,7 +148,7 @@ connector_request() {
   local method=$1 path=$2
   k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
     curl --fail --silent --show-error --request "$method" \
-      "http://localhost:8083/connectors/sink-durable-clickhouse-sink-events$path"
+      "http://localhost:8083/connectors/sink-durable-clickhouse-sink-records$path"
 }
 
 wait_connector_state() {
@@ -183,27 +183,27 @@ start_producer() {
     --env="FIRST=$first" --env="LAST=$last" \
     --command -- /bin/bash -euc '
       for i in $(seq "$FIRST" "$LAST"); do
-        value=$(printf "{\"id\":\"event-%s\",\"external_connection_id\":\"connection-%s\",\"occurred_at\":\"2026-08-29 12:00:00.000\",\"source\":\"e2e\",\"metadata\":\"sequence-%s\"}" "$i" "$i" "$i")
-        printf "event-%s\t%s\n" "$i" "$value"
-      done | /bin/kafka-console-producer.sh --bootstrap-server redpanda:9092 --topic events.canonical --property parse.key=true --property key.separator=$'"'"'\t'"'"'
+        value=$(printf "{\"record_key\":\"record-%s\",\"recorded_at\":\"2026-08-29 12:00:00.000\",\"payload\":\"value-%s\"}" "$i" "$i")
+        printf "record-%s\t%s\n" "$i" "$value"
+      done | /bin/kafka-console-producer.sh --bootstrap-server redpanda:9092 --topic records.input --property parse.key=true --property key.separator=$'"'"'\t'"'"'
     '
 }
 
-start_producer initial-events 1 100
-k -n "$namespace" wait pod/initial-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+start_producer initial-records 1 100
+k -n "$namespace" wait pod/initial-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 
-wait_count 100 'SELECT count() FROM durable_e2e.events'
-wait_count 100 'SELECT uniqExact(id) FROM durable_e2e.events'
+wait_count 100 'SELECT count() FROM durable_e2e.records'
+wait_count 100 'SELECT uniqExact(record_key) FROM durable_e2e.records'
 
-start_producer crash-events 101 1100
+start_producer crash-records 101 1100
 for _ in {1..3}; do
   sleep 2
   k -n "$namespace" delete pod -l app.kubernetes.io/component=connect --grace-period=0 --force --wait=false
   wait_for_ready_pod app.kubernetes.io/component=connect
 done
-k -n "$namespace" wait pod/crash-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=600s
-wait_count 1100 'SELECT count() FROM durable_e2e.events'
-wait_count 1100 'SELECT uniqExact(id) FROM durable_e2e.events'
+k -n "$namespace" wait pod/crash-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=600s
+wait_count 1100 'SELECT count() FROM durable_e2e.records'
+wait_count 1100 'SELECT uniqExact(record_key) FROM durable_e2e.records'
 
 connector_request PUT /pause
 wait_connector_state PAUSED
@@ -245,9 +245,9 @@ base_id=$(jq -r '.recovery_point.backup.id' <<<"$base_output")
 base_manifest=$(jq --compact-output '.recovery_point' <<<"$base_output")
 jq --exit-status '.backup.kind == "full" and .backup.position == 0 and (.backup | has("base") | not)' <<<"$base_manifest" >/dev/null
 
-start_producer incremental-one-events 1101 1150
-k -n "$namespace" wait pod/incremental-one-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
-wait_count 1150 'SELECT count() FROM durable_e2e.events'
+start_producer incremental-one-records 1101 1150
+k -n "$namespace" wait pod/incremental-one-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+wait_count 1150 'SELECT count() FROM durable_e2e.records'
 incremental_one_output=$(run_backup e2e-backup-incremental-one)
 incremental_one=$(jq -r '.name' <<<"$incremental_one_output")
 incremental_one_id=$(jq -r '.recovery_point.backup.id' <<<"$incremental_one_output")
@@ -257,9 +257,9 @@ jq --exit-status --arg id "$base_id" --arg name "$base" '
   .recovery_point.backup.base == {id: $id, name: $name}
 ' <<<"$incremental_one_output" >/dev/null
 
-start_producer incremental-two-events 1151 1200
-k -n "$namespace" wait pod/incremental-two-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
-wait_count 1200 'SELECT count() FROM durable_e2e.events'
+start_producer incremental-two-records 1151 1200
+k -n "$namespace" wait pod/incremental-two-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+wait_count 1200 'SELECT count() FROM durable_e2e.records'
 incremental_two_output=$(run_backup e2e-backup-incremental-two)
 backup=$(jq -r '.name' <<<"$incremental_two_output")
 checkpoint_backup=$(jq -r '.recovery_point.checkpoint_backup.name' <<<"$incremental_two_output")
@@ -292,14 +292,14 @@ fi
 
 start_producer pre-restore-tail 1201 1250
 k -n "$namespace" wait pod/pre-restore-tail --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
-wait_count 1250 'SELECT count() FROM durable_e2e.events'
+wait_count 1250 'SELECT count() FROM durable_e2e.records'
 rollover_output=$(run_backup e2e-backup-rollover)
 jq --exit-status '.recovery_point.backup.kind == "full" and .recovery_point.backup.position == 0' <<<"$rollover_output" >/dev/null
 
 restore_clickhouse 'CREATE DATABASE durable_e2e'
-restore_clickhouse "RESTORE TABLE durable_e2e.events FROM $backup"
-[[ $(restore_clickhouse 'SELECT count() FROM durable_e2e.events') == 1200 ]]
-[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_e2e.events') == 1200 ]]
+restore_clickhouse "RESTORE TABLE durable_e2e.records FROM $backup"
+[[ $(restore_clickhouse 'SELECT count() FROM durable_e2e.records') == 1200 ]]
+[[ $(restore_clickhouse 'SELECT uniqExact(record_key) FROM durable_e2e.records') == 1200 ]]
 
 connector_request PUT /stop
 wait_connector_state STOPPED
@@ -313,7 +313,7 @@ apply_recovery() {
       CLICKHOUSE_URL=http://clickhouse-restore:8123/ \
       CLICKHOUSE_USERNAME=default \
       CLICKHOUSE_PASSWORD= \
-      CONNECTOR_NAMES=sink-durable-clickhouse-sink-events \
+      CONNECTOR_NAMES=sink-durable-clickhouse-sink-records \
       EXPECTED_BACKUP_NAME="$expected_backup" \
       RECOVERY_MANIFEST_FILE=- \
       STOP_TIMEOUT_SECONDS=120 \
@@ -338,7 +338,7 @@ assert_recovery_rejected() {
 
 assert_recovery_rejected missing-keeper-checkpoint "$manifest" "$backup"
 
-restore_clickhouse "RESTORE TABLE durable_e2e.durable_sink_e2e_events_state FROM $checkpoint_backup"
+restore_clickhouse "RESTORE TABLE durable_e2e.durable_sink_e2e_records_state FROM $checkpoint_backup"
 
 offset_plus_one=$(jq --compact-output '(.connectors[0].offsets[0].offset.kafka_offset) += 1' <<<"$manifest")
 offset_minus_one=$(jq --compact-output '(.connectors[0].offsets[0].offset.kafka_offset) -= 1' <<<"$manifest")
@@ -352,7 +352,7 @@ assert_recovery_rejected exact-offset-plus-one "$offset_plus_one" "$backup"
 assert_recovery_rejected exact-offset-minus-one "$offset_minus_one" "$backup"
 assert_recovery_rejected duplicate-topic-partition "$duplicate_offset" "$backup"
 assert_recovery_rejected restored-keeper-mismatch "$keeper_ahead" "$backup"
-assert_recovery_rejected wrong-event-backup "$manifest" "$base"
+assert_recovery_rejected wrong-target-backup "$manifest" "$base"
 
 connector_request PUT /resume
 wait_connector_state RUNNING
@@ -372,15 +372,15 @@ helm --kubeconfig "$kubeconfig" upgrade sink "$chart" \
 connector_request PUT /resume
 wait_connector_state RUNNING
 
-start_producer post-restore-events 1251 1300
-k -n "$namespace" wait pod/post-restore-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+start_producer post-restore-records 1251 1300
+k -n "$namespace" wait pod/post-restore-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 for _ in {1..240}; do
-  restored=$(restore_clickhouse 'SELECT count() FROM durable_e2e.events' 2>/dev/null || true)
+  restored=$(restore_clickhouse 'SELECT count() FROM durable_e2e.records' 2>/dev/null || true)
   [[ $restored == 1300 ]] && break
   sleep 1
 done
 [[ $restored == 1300 ]]
-[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_e2e.events') == 1300 ]]
-[[ $(clickhouse 'SELECT count() FROM durable_e2e.events') == 1250 ]]
+[[ $(restore_clickhouse 'SELECT uniqExact(record_key) FROM durable_e2e.records') == 1300 ]]
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.records') == 1250 ]]
 
 echo "RKE2 E2E passed: Connect crash retries, exact KeeperMap offsets, full/incremental rollover, adversarial recovery rejection, tail replay, and restore cutover"

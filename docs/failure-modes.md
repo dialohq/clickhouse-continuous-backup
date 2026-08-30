@@ -14,7 +14,7 @@ longer safe. A failed check does not authorize an operator to bypass it.
 | Input topic is missing, has a different partition count, was truncated past a saved offset, or has a high watermark below it | Backup checks before and after the archive work; restore checks before changing Connect. The operation fails. |
 | Recovery topic has more than one partition | The backup lock and catalog refuse to operate. The managed-topic Job also verifies its partition count. |
 | Another release or pipeline topology reuses the recovery topic | The versioned chain head scope differs and backup fails before pausing connectors. |
-| Event backup succeeds but checkpoint, validation, or catalog publication fails | No recovery point is committed. Completed S3 objects are unreferenced orphans and delivery resumes when Connect is reachable. |
+| Target-data backup succeeds but checkpoint, validation, or catalog publication fails | No recovery point is committed. Completed S3 objects are unreferenced orphans and delivery resumes when Connect is reachable. |
 | Manifest is malformed, names another backup, duplicates partitions/connectors, or disagrees with restored KeeperMap | Restore fails before changing offsets. |
 | One of several Connect offset updates fails | Every connector remains stopped. The restore command is retryable and verifies all offset read-backs before returning success. |
 | Object-store or ClickHouse backup error | `system.backups` must report the exact ID, destination, sizes, and `BACKUP_CREATED`; otherwise no manifest is committed. |
@@ -51,7 +51,7 @@ required Kafka records, ClickHouse backups, and recovery catalog.
   Size it for the maximum uncertain retry backlog and prevent unrelated writers
   from evicting connector block IDs.
 - The guarantee covers byte-identical connector retries. It does not merge two
-  logical events, repair producer loss before Kafka acknowledgement, or cover
+  logical records, repair producer loss before Kafka acknowledgement, or cover
   side effects outside Kafka and ClickHouse.
 - Schema changes, materialized-view behavior, mutations, deletes, manual offset
   rewinds, manual KeeperMap edits, topic recreation, and ClickHouse corruption
