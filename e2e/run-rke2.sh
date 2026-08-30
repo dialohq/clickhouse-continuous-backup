@@ -328,7 +328,7 @@ apply_table_recovery() {
       kind: "TableRecovery",
       metadata: {name: $name},
       spec: {
-        source: {database: "durable_e2e", table: "records", recoveryPointID: $id},
+        source: {database: "durable_e2e", table: "records", backupID: $id},
         destination: {database: "durable_e2e", table: $table},
         targetOffsets: $targets
       }
@@ -339,7 +339,7 @@ apply_table_recovery() {
       kind: "TableRecovery",
       metadata: {name: $name},
       spec: {
-        source: {database: "durable_e2e", table: "records", recoveryPointID: $id},
+        source: {database: "durable_e2e", table: "records", backupID: $id},
         destination: {database: "durable_e2e", table: $table}
       }
     }' | k -n "$namespace" apply -f -

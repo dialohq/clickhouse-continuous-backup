@@ -5,7 +5,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{BackupManifest, ConnectorCheckpoint, KafkaOffset};
+use crate::model::{BackupManifest, ConnectorCheckpoint, KafkaOffset, clickhouse_identifier};
 
 #[derive(CustomResource, Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[kube(
@@ -30,8 +30,8 @@ pub struct TableRecoverySpec {
 pub struct RecoverySource {
     pub database: String,
     pub table: String,
-    #[serde(rename = "recoveryPointID")]
-    pub recovery_point_id: String,
+    #[serde(rename = "backupID")]
+    pub backup_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -81,8 +81,8 @@ impl RecoveryPlan {
                 bail!("{name} must be a ClickHouse identifier")
             }
         }
-        if point.backup.id.to_string() != spec.source.recovery_point_id {
-            bail!("recovery point ID does not match the requested source")
+        if point.backup.id.to_string() != spec.source.backup_id {
+            bail!("backup ID does not match the requested source")
         }
         let connectors = point
             .connectors
@@ -107,14 +107,6 @@ impl RecoveryPlan {
             target_offsets,
         })
     }
-}
-
-fn clickhouse_identifier(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters
-        .next()
-        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn flatten_offsets(checkpoints: &[ConnectorCheckpoint]) -> Result<Vec<RecoveryOffset>> {
@@ -273,7 +265,7 @@ mod tests {
             source: RecoverySource {
                 database: "events".to_owned(),
                 table: "records".to_owned(),
-                recovery_point_id: id.to_string(),
+                backup_id: id.to_string(),
             },
             destination: RecoveryDestination {
                 database: "recovery".to_owned(),
@@ -295,7 +287,7 @@ mod tests {
             .unwrap();
         assert_eq!(rules[0]["rule"], "self == oldSelf");
         assert!(
-            crd.pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/source/properties/recoveryPointID")
+            crd.pointer("/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/source/properties/backupID")
                 .is_some()
         );
     }

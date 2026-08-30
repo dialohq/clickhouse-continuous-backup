@@ -115,12 +115,12 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
         &context.config.kafka_bootstrap_servers,
         &context.kafka_properties,
         &context.config.catalog_topic,
-        &resource.spec.source.recovery_point_id,
+        &resource.spec.source.backup_id,
         &uid,
         &context.config.timeouts,
     )
     .await?
-    .context("recovery point was not found in the Kafka catalog")?;
+    .context("backup manifest was not found in the Kafka catalog")?;
     let point: BackupManifest = serde_json::from_str(&manifest)?;
     validate_manifest(&point)?;
     let plan = RecoveryPlan::new(&resource.spec, &point)?;

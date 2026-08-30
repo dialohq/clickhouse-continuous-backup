@@ -13,7 +13,7 @@ spec:
   source:
     database: events
     table: records
-    recoveryPointID: 9f55f211-78d2-43dc-a24b-f8545ec6a097
+    backupID: 9f55f211-78d2-43dc-a24b-f8545ec6a097
   destination:
     database: recovery
     table: records_at_cutoff
@@ -39,7 +39,7 @@ is `Complete`. Resuming those connectors is an explicit cutover decision.
 
 ## Procedure encoded by the controller
 
-1. Read the backup manifest by `recoveryPointID` from the compacted backup
+1. Read the backup manifest by `backupID` from the compacted backup
    catalog topic and validate its table identity, connector set, and exact
    KeeperMap-derived start offsets.
 2. Validate that an explicit target vector is complete, monotonic from the
@@ -78,7 +78,7 @@ and connector names are deterministic.
 
 ## Operator workflow
 
-1. Choose a recovery-point ID whose backup chain and Kafka range are retained.
+1. Choose a backup ID whose backup chain and Kafka range are retained.
 2. Create the empty destination table through the normal schema-management
    tool. Use the intended production engine; archived clone metadata is not a
    schema template.

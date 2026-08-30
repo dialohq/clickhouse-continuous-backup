@@ -74,6 +74,7 @@
           credentialsSecret.name = "clickhouse-credentials";
         };
         recovery = {
+          credentialsSecret.name = "clickhouse-recovery-credentials";
           replayTopicReplicationFactor = 1;
           replayTopicRetentionMs = 3600000;
           replayBatchRecords = 1;
@@ -118,11 +119,14 @@
           --set-string 'pipelines[0].table=records'
           --set backup.enabled=true
           --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
+          --set-string recovery.credentialsSecret.name=clickhouse-recovery-credentials
           --set backup.maxIncrementalsPerFull=2
           --set backup.maxBandwidthBytesPerSecond=1048576
         )
         helm lint --strict ${packages.chartSource} "''${chart_args[@]}"
         helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
+        helm template test ${packages.chartSource} "''${chart_args[@]}" \
+          --set backup.enabled=false > rendered-without-backups.yaml
         helm template test ${packages.chartSource} "''${chart_args[@]}" \
           --set-string 'pipelines[1].name=other' \
           --set-string 'pipelines[1].topic=other.input' \
@@ -171,10 +175,12 @@
         grep -F '.backup-catalog' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
         grep -F 'component: recovery-controller' rendered.yaml >/dev/null
+        grep -F 'component: recovery-controller' rendered-without-backups.yaml >/dev/null
         grep -F 'resources: ["tablerecoveries/status"]' rendered.yaml >/dev/null
-        grep -F 'name: REPLAY_TOPIC_RETENTION_MS' rendered.yaml >/dev/null
-        grep -F 'value: "604800000"' rendered.yaml >/dev/null
-        grep -F 'recoveryPointID:' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
+        grep -F '/etc/durable-clickhouse/recovery.json' rendered.yaml >/dev/null
+        grep -F '"replayTopicRetentionMs": 604800000' rendered.yaml >/dev/null
+        grep -F 'secretName: clickhouse-recovery-credentials' rendered.yaml >/dev/null
+        grep -F 'backupID:' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
         grep -F 'rule: self == oldSelf' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
         touch $out
       '';

@@ -106,6 +106,9 @@ let
         failedJobsHistoryLimit: 3
 
       recovery:
+        credentialsSecret:
+          name: ""
+          propertiesKey: clickhouse.properties
         replayTopicReplicationFactor: 3
         replayTopicRetentionMs: 604800000
         replayBatchRecords: 500
@@ -245,8 +248,16 @@ let
         };
         recovery = {
           type = "object";
-          required = ["replayTopicReplicationFactor" "replayTopicRetentionMs" "replayBatchRecords"];
+          required = ["credentialsSecret" "replayTopicReplicationFactor" "replayTopicRetentionMs" "replayBatchRecords"];
           properties = {
+            credentialsSecret = {
+              type = "object";
+              required = ["name" "propertiesKey"];
+              properties = {
+                name = {type = "string"; minLength = 1;};
+                propertiesKey = {type = "string"; minLength = 1;};
+              };
+            };
             replayTopicReplicationFactor = {type = "integer"; minimum = 1;};
             replayTopicRetentionMs = {type = "integer"; minimum = 60000;};
             replayBatchRecords = {type = "integer"; minimum = 1; maximum = 100000;};
@@ -357,6 +368,9 @@ let
       {{- if and .Values.backup.enabled (not .Values.backup.credentialsSecret.name) }}
       {{- fail "backup.credentialsSecret.name is required when backups are enabled" }}
       {{- end }}
+      {{- if not .Values.recovery.credentialsSecret.name }}
+      {{- fail "recovery.credentialsSecret.name is required" }}
+      {{- end }}
       {{- $minimumResumeGrace := mul (len .Values.pipelines) (int .Values.timeouts.connectRequestSeconds) }}
       {{- if le (int .Values.backup.terminationGracePeriodSeconds) (int $minimumResumeGrace) }}
       {{- fail "backup.terminationGracePeriodSeconds must exceed connectRequestSeconds multiplied by the pipeline count" }}
@@ -439,6 +453,22 @@ let
             "maxIncrementalsPerFull": {{ .Values.backup.maxIncrementalsPerFull }},
             "maxBackupBandwidth": {{ .Values.backup.maxBandwidthBytesPerSecond }},
             "pipelines": {{ include "durable-clickhouse-sink.backupPipelines" . }},
+            "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
+          }
+        recovery.json: |
+          {
+            "connectUrl": "http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083",
+            "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
+            "clickhousePropertiesFile": "/etc/clickhouse-recovery/clickhouse.properties",
+            "clickhouseConnectorHost": {{ .Values.clickhouse.host | quote }},
+            "clickhouseConnectorPort": {{ .Values.clickhouse.port }},
+            "clickhouseConnectorSecure": {{ .Values.clickhouse.secure }},
+            "kafkaBootstrapServers": {{ .Values.kafka.bootstrapServers | quote }},
+            "kafkaPropertiesFile": {{ ternary (quote "/etc/kafka-recovery/client.properties") "null" (not (empty .Values.kafka.existingSecret)) }},
+            "catalogTopic": {{ include "durable-clickhouse-sink.catalogTopic" . | quote }},
+            "replayTopicReplicationFactor": {{ .Values.recovery.replayTopicReplicationFactor }},
+            "replayTopicRetentionMs": {{ int64 .Values.recovery.replayTopicRetentionMs }},
+            "replayBatchRecords": {{ .Values.recovery.replayBatchRecords }},
             "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
           }
     '';
@@ -897,7 +927,6 @@ let
     '';
 
     "templates/recovery-controller.yaml" = ''
-      {{- if .Values.backup.enabled }}
       apiVersion: rbac.authorization.k8s.io/v1
       kind: Role
       metadata:
@@ -959,46 +988,31 @@ let
               - name: controller
                 image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
                 imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
-                command: ["/bin/durable-clickhouse-backup", "recovery-controller"]
+                command: ["/bin/durable-clickhouse-backup", "recovery-controller", "/etc/durable-clickhouse/recovery.json"]
                 resources:
                   {{- toYaml .Values.recovery.resources | nindent 18 }}
                 env:
                   - name: POD_NAMESPACE
                     valueFrom:
                       fieldRef: {fieldPath: metadata.namespace}
-                  - name: CONNECT_URL
-                    value: http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083
-                  - name: CLICKHOUSE_URL
-                    value: {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }}
-                  - {name: CLICKHOUSE_CONNECTOR_HOST, value: {{ .Values.clickhouse.host | quote }}}
-                  - {name: CLICKHOUSE_CONNECTOR_PORT, value: {{ .Values.clickhouse.port | quote }}}
-                  - {name: CLICKHOUSE_CONNECTOR_SECURE, value: {{ .Values.clickhouse.secure | quote }}}
-                  - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
-                  - {name: KAFKA_BACKUP_CATALOG_TOPIC, value: {{ include "durable-clickhouse-sink.catalogTopic" . | quote }}}
-                  - {name: REPLAY_TOPIC_REPLICATION_FACTOR, value: {{ int .Values.recovery.replayTopicReplicationFactor | quote }}}
-                  - {name: REPLAY_TOPIC_RETENTION_MS, value: {{ int64 .Values.recovery.replayTopicRetentionMs | quote }}}
-                  - {name: REPLAY_BATCH_RECORDS, value: {{ int .Values.recovery.replayBatchRecords | quote }}}
-                  - {name: RUNTIME_TIMEOUTS, value: {{ include "durable-clickhouse-sink.runtimeTimeouts" . | quote }}}
-                  {{- if .Values.kafka.existingSecret }}
-                  - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka-recovery/client.properties}
-                  {{- end }}
-                  - name: CLICKHOUSE_USERNAME
-                    valueFrom:
-                      secretKeyRef:
-                        name: {{ .Values.backup.credentialsSecret.name }}
-                        key: {{ .Values.backup.credentialsSecret.usernameKey }}
-                  - name: CLICKHOUSE_PASSWORD
-                    valueFrom:
-                      secretKeyRef:
-                        name: {{ .Values.backup.credentialsSecret.name }}
-                        key: {{ .Values.backup.credentialsSecret.passwordKey }}
                 volumeMounts:
                   - {name: tmp, mountPath: /tmp}
+                  - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
+                  - {name: clickhouse-recovery-credentials, mountPath: /etc/clickhouse-recovery, readOnly: true}
                   {{- if .Values.kafka.existingSecret }}
                   - {name: kafka-recovery-client, mountPath: /etc/kafka-recovery, readOnly: true}
                   {{- end }}
             volumes:
               - {name: tmp, emptyDir: {}}
+              - name: runtime-config
+                configMap:
+                  name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+              - name: clickhouse-recovery-credentials
+                secret:
+                  secretName: {{ .Values.recovery.credentialsSecret.name }}
+                  items:
+                    - key: {{ .Values.recovery.credentialsSecret.propertiesKey }}
+                      path: clickhouse.properties
               {{- if .Values.kafka.existingSecret }}
               - name: kafka-recovery-client
                 secret:
@@ -1007,7 +1021,6 @@ let
                     - key: {{ .Values.backup.kafkaPropertiesKey }}
                       path: client.properties
               {{- end }}
-      {{- end }}
     '';
 
     "templates/NOTES.txt" = ''

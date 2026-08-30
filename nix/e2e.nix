@@ -30,6 +30,10 @@ in {
         username = "missing";
         password = "wrong";
       };
+      secrets.clickhouse-recovery-credentials.stringData."clickhouse.properties" = ''
+        username=default
+        password=
+      '';
 
       services = {
         redpanda.spec = {

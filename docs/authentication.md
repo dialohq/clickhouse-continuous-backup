@@ -72,10 +72,14 @@ TABLE` and `DROP TABLE` for temporary copy-on-write snapshots, access to
 `system.backups` and `system.tables`, and ClickHouse's `BACKUP` permission for
 the snapshot objects. It also reads `system.merge_tree_settings` to reject a
 disabled effective replicated deduplication window. The backup identity should
-not be the ingestion writer. The recovery identity needs
-`RESTORE` on the selected archive, `SELECT` on destination tables and
-`system.tables`, and `CREATE TABLE`, `SELECT`, and `INSERT` for isolated
-KeeperMap tables. It should not be the ingestion writer either.
+not be the ingestion writer.
+
+Recovery uses a separate `recovery.credentialsSecret` containing
+`clickhouse.properties` with the same file format as the writer Secret. The
+recovery identity needs `RESTORE` on the selected archive, `SELECT` on
+destination tables and `system.tables`, and `CREATE TABLE`, `SELECT`, and
+`INSERT` for isolated KeeperMap tables. It should be distinct from both the
+ingestion writer and backup identity.
 
 RGW/S3 credentials are not passed through Helm. Configure
 `backup.namedCollection` on every ClickHouse server. The
