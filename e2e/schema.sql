@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS durable_e2e.invalid_future_records AS durable_e2e.rec
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/durable_e2e/invalid_future_records', '01')
 ORDER BY (recorded_at, record_key);
 
+CREATE TABLE IF NOT EXISTS durable_e2e.invalid_credentials_records AS durable_e2e.records
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/durable_e2e/invalid_credentials_records', '01')
+ORDER BY (recorded_at, record_key);
+
 CREATE TABLE IF NOT EXISTS durable_e2e.ambiguous_restore_records AS durable_e2e.records
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/durable_e2e/ambiguous_restore_records', '01')
 ORDER BY (recorded_at, record_key);

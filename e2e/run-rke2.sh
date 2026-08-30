@@ -352,6 +352,17 @@ wait_recovery() {
     --for="jsonpath={.status.phase}=$phase" --timeout=900s
 }
 
+k -n "$namespace" patch deployment/sink-durable-clickhouse-sink-recovery --type=strategic \
+  --patch '{"spec":{"template":{"spec":{"volumes":[{"name":"clickhouse-recovery-credentials","secret":{"secretName":"clickhouse-bad-recovery"}}]}}}}'
+k -n "$namespace" rollout status deployment/sink-durable-clickhouse-sink-recovery --timeout=300s
+apply_table_recovery invalid-credentials invalid_credentials_records "$target_offsets"
+k -n "$namespace" wait tablerecovery/invalid-credentials \
+  --for=jsonpath='{.status.conditions[?(@.reason=="ReconcileFailed")].reason}'=ReconcileFailed --timeout=300s
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.invalid_credentials_records') == 0 ]]
+k -n "$namespace" patch deployment/sink-durable-clickhouse-sink-recovery --type=strategic \
+  --patch '{"spec":{"template":{"spec":{"volumes":[{"name":"clickhouse-recovery-credentials","secret":{"secretName":"clickhouse-recovery-credentials"}}]}}}}'
+k -n "$namespace" rollout status deployment/sink-durable-clickhouse-sink-recovery --timeout=300s
+
 partial_offsets=$(jq '.[0:-1]' <<<"$target_offsets")
 apply_table_recovery invalid-partial invalid_partial_records "$partial_offsets"
 k -n "$namespace" wait tablerecovery/invalid-partial \
@@ -435,4 +446,4 @@ wait_count 1260 'SELECT uniqExact(record_key) FROM durable_e2e.live_records'
 rollover_output=$(run_backup e2e-backup-rollover)
 jq --exit-status '.manifest.backup.kind == "full" and .manifest.backup.position == 0' <<<"$rollover_output" >/dev/null
 
-echo "RKE2 E2E passed: crash retries, snapshot concurrency, incremental rollover, adversarial offset rejection, bounded PITR restart, live follow, KeeperMap rehydration, tail replay, and restore cutover"
+echo "RKE2 E2E passed: crash retries, snapshot concurrency, incremental rollover, recovery credential rotation, adversarial offset rejection, bounded PITR restart, live follow, KeeperMap rehydration, tail replay, and restore cutover"

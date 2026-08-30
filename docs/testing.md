@@ -55,15 +55,17 @@ It verifies:
    expected row count;
 8. the compacted backup manifest contains exact KeeperMap-derived offsets and
    chain dependencies;
-9. declarative bounded PITR restores a table and transactionally replays to an
+9. invalid recovery credentials fail before changing the destination, and a
+   rollout loads the dedicated recovery Secret;
+10. declarative bounded PITR restores a table and transactionally replays to an
     exact multi-partition vector, including a forced controller restart;
-10. malformed and beyond-log-end vectors fail before changing their empty
+11. malformed and beyond-log-end vectors fail before changing their empty
     destinations;
-11. an omitted vector starts isolated live-follow connectors and ingests new
+12. an omitted vector starts isolated live-follow connectors and ingests new
     records once, including reconciliation of a pre-created stopped connector
     whose offset patch was interrupted before KeeperMap hydration; an explicit
     recovery leaves its follow connector stopped at the requested point;
-12. a non-empty destination whose restore acknowledgement was lost fails closed
+13. a non-empty destination whose restore acknowledgement was lost fails closed
     and remains untouched.
 
 MinIO is test-only. Production uses an externally managed S3-compatible store,

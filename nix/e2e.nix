@@ -34,6 +34,10 @@ in {
         username=default
         password=
       '';
+      secrets.clickhouse-bad-recovery.stringData."clickhouse.properties" = ''
+        username=missing
+        password=wrong
+      '';
 
       services = {
         redpanda.spec = {

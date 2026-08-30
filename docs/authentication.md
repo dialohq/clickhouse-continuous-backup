@@ -97,6 +97,11 @@ must trigger a controlled Connect task restart before the old lease expires.
 `connect.podAnnotations` is available for a provider-specific reload
 controller; the chart itself does not assume one.
 
+The recovery controller reads its ClickHouse properties file at startup.
+Rotate `recovery.credentialsSecret` with a controlled Deployment rollout; the
+RKE2 suite verifies failure with invalid credentials and successful reload of
+the restored Secret.
+
 Short-lived credentials are safe only when the external issuer, Secret sync,
 and restart controller are tested together. Prefer renewable credentials whose
 lease comfortably exceeds the maximum restart and incident-recovery time.
