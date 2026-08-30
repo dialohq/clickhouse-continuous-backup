@@ -1,5 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use anyhow::{Result, bail};
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -127,25 +125,21 @@ fn validate_targets(
     targets: &[RecoveryOffset],
 ) -> Result<Vec<RecoveryOffset>> {
     let targets = sorted_unique(targets.to_vec(), "targetOffsets")?;
-    let starts_by_partition = starts
+    if !starts
         .iter()
-        .map(|offset| ((offset.topic.as_str(), offset.partition), offset.offset))
-        .collect::<BTreeMap<_, _>>();
-    let targets_by_partition = targets
-        .iter()
-        .map(|offset| ((offset.topic.as_str(), offset.partition), offset.offset))
-        .collect::<BTreeMap<_, _>>();
-    if starts_by_partition.keys().collect::<Vec<_>>()
-        != targets_by_partition.keys().collect::<Vec<_>>()
+        .map(|offset| (&offset.topic, offset.partition))
+        .eq(targets
+            .iter()
+            .map(|offset| (&offset.topic, offset.partition)))
     {
         bail!("targetOffsets must contain every source topic-partition exactly once")
     }
-    for (partition, start) in starts_by_partition {
-        if targets_by_partition[&partition] < start {
+    for (start, target) in starts.iter().zip(&targets) {
+        if target.offset < start.offset {
             bail!(
                 "target offset is before the recovery point for {}-{}",
-                partition.0,
-                partition.1
+                start.topic,
+                start.partition
             )
         }
     }
@@ -155,11 +149,10 @@ fn validate_targets(
 fn sorted_unique(mut offsets: Vec<RecoveryOffset>, source: &str) -> Result<Vec<RecoveryOffset>> {
     offsets
         .sort_by(|left, right| (&left.topic, left.partition).cmp(&(&right.topic, right.partition)));
-    let unique = offsets
-        .iter()
-        .map(|offset| (&offset.topic, offset.partition))
-        .collect::<BTreeSet<_>>();
-    if unique.len() != offsets.len() {
+    if offsets
+        .windows(2)
+        .any(|pair| pair[0].topic == pair[1].topic && pair[0].partition == pair[1].partition)
+    {
         bail!("{source} contains a duplicate topic-partition")
     }
     Ok(offsets)
