@@ -1,4 +1,9 @@
-use std::{collections::HashMap, env, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use serde::{
@@ -49,16 +54,21 @@ pub struct RuntimeTimeouts {
     pub kafka_max_poll: Duration,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupConfig {
     pub connect_url: String,
     pub clickhouse_url: String,
+    #[serde(skip)]
     pub clickhouse_username: String,
+    #[serde(skip)]
     pub clickhouse_password: String,
     pub named_collection: String,
     pub path_prefix: String,
     pub archive_extension: String,
+    #[serde(skip)]
     pub run_id: String,
+    #[serde(rename = "pauseTimeoutSeconds", deserialize_with = "positive_seconds")]
     pub pause_timeout: Duration,
     pub kafka_bootstrap_servers: String,
     pub kafka_properties_file: Option<PathBuf>,
@@ -69,19 +79,17 @@ pub struct BackupConfig {
     pub timeouts: RuntimeTimeouts,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TargetConfig {
     pub clickhouse_url: String,
+    clickhouse_properties_file: PathBuf,
+    #[serde(skip)]
     pub clickhouse_username: String,
+    #[serde(skip)]
     pub clickhouse_password: String,
     pub pipelines: Vec<Pipeline>,
     pub timeouts: RuntimeTimeouts,
-}
-
-impl RuntimeTimeouts {
-    fn from_environment() -> Result<Self> {
-        json("RUNTIME_TIMEOUTS")
-    }
 }
 
 fn positive_seconds<'de, D: Deserializer<'de>>(
@@ -95,46 +103,30 @@ fn positive_seconds<'de, D: Deserializer<'de>>(
 }
 
 impl BackupConfig {
-    pub fn from_environment() -> Result<Self> {
-        let run_id = required("BACKUP_RUN_ID")?;
-        validate_token("BACKUP_RUN_ID", &run_id, |character| {
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let mut config: Self = read_config(path)?;
+        config.run_id = required("BACKUP_RUN_ID")?;
+        config.clickhouse_username = required("CLICKHOUSE_USERNAME")?;
+        config.clickhouse_password = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
+        validate_token("BACKUP_RUN_ID", &config.run_id, |character| {
             character.is_ascii_alphanumeric() || character == '-'
         })?;
-        let named_collection = identifier("BACKUP_NAMED_COLLECTION")?;
-        let path_prefix = required("BACKUP_PATH_PREFIX")?;
-        validate_token("BACKUP_PATH_PREFIX", &path_prefix, |character| {
+        if !clickhouse_identifier(&config.named_collection) {
+            bail!("namedCollection must be a ClickHouse identifier")
+        }
+        validate_token("pathPrefix", &config.path_prefix, |character| {
             character.is_ascii_alphanumeric() || "_./-".contains(character)
         })?;
-        if !storage_path(&path_prefix) {
-            bail!(
-                "BACKUP_PATH_PREFIX must be a relative object path without empty, . or .. segments"
-            )
+        if !storage_path(&config.path_prefix) {
+            bail!("pathPrefix must be a relative object path without empty, . or .. segments")
         }
-        let archive_extension = required("BACKUP_ARCHIVE_EXTENSION")?;
         if !["tar.zst", "tar.gz", "tar.xz", "tar.bz2", "tgz", "tzst"]
-            .contains(&archive_extension.as_str())
+            .contains(&config.archive_extension.as_str())
         {
-            bail!("unsupported BACKUP_ARCHIVE_EXTENSION")
+            bail!("unsupported archiveExtension")
         }
-        let pipelines = pipelines()?;
-        Ok(Self {
-            connect_url: required("CONNECT_URL")?,
-            clickhouse_url: required("CLICKHOUSE_URL")?,
-            clickhouse_username: required("CLICKHOUSE_USERNAME")?,
-            clickhouse_password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
-            named_collection,
-            path_prefix,
-            archive_extension,
-            run_id,
-            pause_timeout: seconds("PAUSE_TIMEOUT_SECONDS")?,
-            kafka_bootstrap_servers: required("KAFKA_BOOTSTRAP_SERVERS")?,
-            kafka_properties_file: optional("KAFKA_PROPERTIES_FILE").map(PathBuf::from),
-            catalog_topic: required("KAFKA_BACKUP_CATALOG_TOPIC")?,
-            max_incrementals_per_full: unsigned("MAX_INCREMENTALS_PER_FULL")?,
-            max_backup_bandwidth: unsigned64("MAX_BACKUP_BANDWIDTH")?,
-            pipelines,
-            timeouts: RuntimeTimeouts::from_environment()?,
-        })
+        validate_pipelines(&config.pipelines)?;
+        Ok(config)
     }
 
     pub fn kafka_properties(&self) -> Result<HashMap<String, String>> {
@@ -143,27 +135,16 @@ impl BackupConfig {
 }
 
 impl TargetConfig {
-    pub fn from_environment() -> Result<Self> {
-        let pipelines = pipelines()?;
-        let credentials = optional("CLICKHOUSE_PROPERTIES_FILE")
-            .map(|path| read_properties(&PathBuf::from(path), "ClickHouse"))
-            .transpose()?;
-        let clickhouse_username = credentials
-            .as_ref()
-            .and_then(|properties| properties.get("username").cloned())
-            .map(Ok)
-            .unwrap_or_else(|| required("CLICKHOUSE_USERNAME"))?;
-        let clickhouse_password = credentials
-            .as_ref()
-            .and_then(|properties| properties.get("password").cloned())
-            .unwrap_or_else(|| env::var("CLICKHOUSE_PASSWORD").unwrap_or_default());
-        Ok(Self {
-            clickhouse_url: required("CLICKHOUSE_URL")?,
-            clickhouse_username,
-            clickhouse_password,
-            pipelines,
-            timeouts: RuntimeTimeouts::from_environment()?,
-        })
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let mut config: Self = read_config(path)?;
+        validate_pipelines(&config.pipelines)?;
+        let credentials = read_properties(&config.clickhouse_properties_file, "ClickHouse")?;
+        config.clickhouse_username = credentials
+            .get("username")
+            .cloned()
+            .context("ClickHouse username property is required")?;
+        config.clickhouse_password = credentials.get("password").cloned().unwrap_or_default();
+        Ok(config)
     }
 }
 
@@ -201,56 +182,26 @@ fn required(name: &str) -> Result<String> {
         .with_context(|| format!("{name} is required"))
 }
 
-fn optional(name: &str) -> Option<String> {
-    env::var(name).ok().filter(|value| !value.is_empty())
+fn read_config<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config from {}", path.display()))?;
+    serde_json::from_str(&contents).with_context(|| format!("invalid config in {}", path.display()))
 }
 
-fn seconds(name: &str) -> Result<Duration> {
-    let value = required(name)?
-        .parse::<u64>()
-        .with_context(|| format!("{name} must be a positive integer"))?;
-    if value == 0 {
-        bail!("{name} must be a positive integer")
-    }
-    Ok(Duration::from_secs(value))
-}
-
-fn unsigned(name: &str) -> Result<u32> {
-    required(name)?
-        .parse()
-        .with_context(|| format!("{name} must be a non-negative integer"))
-}
-
-fn unsigned64(name: &str) -> Result<u64> {
-    required(name)?
-        .parse()
-        .with_context(|| format!("{name} must be a non-negative integer"))
-}
-
-fn json<T: DeserializeOwned>(name: &str) -> Result<T> {
-    serde_json::from_str(&required(name)?).with_context(|| format!("{name} must be valid JSON"))
-}
-
-fn pipelines() -> Result<Vec<Pipeline>> {
-    let pipelines: Vec<Pipeline> = json("BACKUP_PIPELINES")?;
+fn validate_pipelines(pipelines: &[Pipeline]) -> Result<()> {
     if pipelines.is_empty() {
-        bail!("BACKUP_PIPELINES must contain at least one pipeline")
+        bail!("pipelines must contain at least one pipeline")
     }
     pipelines.iter().try_for_each(Pipeline::validate)?;
-    Ok(pipelines)
+    Ok(())
 }
 
-fn identifier(name: &str) -> Result<String> {
-    let value = required(name)?;
+fn clickhouse_identifier(value: &str) -> bool {
     let mut characters = value.chars();
-    if !characters
+    characters
         .next()
         .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-        || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
-    {
-        bail!("{name} must be a ClickHouse identifier")
-    }
-    Ok(value)
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn validate_token(name: &str, value: &str, allowed: impl Fn(char) -> bool) -> Result<()> {

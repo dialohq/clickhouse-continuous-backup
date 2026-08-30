@@ -33,8 +33,8 @@ struct CreatedArchives {
     target_details: BackupDetails,
 }
 
-pub async fn run() -> Result<()> {
-    let config = BackupConfig::from_environment()?;
+pub async fn run(path: &std::path::Path) -> Result<()> {
+    let config = BackupConfig::from_file(path)?;
     let connectors = config
         .pipelines
         .iter()

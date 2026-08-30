@@ -2,8 +2,8 @@ use anyhow::Result;
 
 use crate::{clickhouse::ClickHouse, config::TargetConfig};
 
-pub async fn run() -> Result<()> {
-    let config = TargetConfig::from_environment()?;
+pub async fn run(path: &std::path::Path) -> Result<()> {
+    let config = TargetConfig::from_file(path)?;
     ClickHouse::new(
         config.clickhouse_url,
         config.clickhouse_username,

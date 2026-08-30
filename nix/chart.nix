@@ -373,6 +373,39 @@ let
           offset.flush.interval.ms=1000
     '';
 
+    "templates/runtime-config.yaml" = ''
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+        labels:
+          {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+      data:
+        target.json: |
+          {
+            "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
+            "clickhousePropertiesFile": "/etc/clickhouse/clickhouse.properties",
+            "pipelines": {{ include "durable-clickhouse-sink.backupPipelines" . }},
+            "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
+          }
+        backup.json: |
+          {
+            "connectUrl": "http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083",
+            "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
+            "namedCollection": {{ .Values.backup.namedCollection | quote }},
+            "pathPrefix": {{ trimSuffix "/" .Values.backup.pathPrefix | quote }},
+            "archiveExtension": {{ .Values.backup.archiveExtension | quote }},
+            "pauseTimeoutSeconds": {{ .Values.backup.pauseTimeoutSeconds }},
+            "kafkaBootstrapServers": {{ .Values.kafka.bootstrapServers | quote }},
+            "kafkaPropertiesFile": {{ ternary (quote "/etc/kafka-backup/client.properties") "null" (not (empty .Values.kafka.existingSecret)) }},
+            "catalogTopic": {{ include "durable-clickhouse-sink.catalogTopic" . | quote }},
+            "maxIncrementalsPerFull": {{ .Values.backup.maxIncrementalsPerFull }},
+            "maxBackupBandwidth": {{ .Values.backup.maxBandwidthBytesPerSecond }},
+            "pipelines": {{ include "durable-clickhouse-sink.backupPipelines" . }},
+            "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
+          }
+    '';
+
     "templates/connect.yaml" = ''
       apiVersion: v1
       kind: Service
@@ -677,18 +710,10 @@ let
               - name: validate-clickhouse-targets
                 image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
                 imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
-                command: ["/bin/durable-clickhouse-backup", "validate-targets"]
-                env:
-                  - name: CLICKHOUSE_URL
-                    value: {{ printf "%s://%s:%v/" (ternary "https" "http" $.Values.clickhouse.secure) $.Values.clickhouse.host $.Values.clickhouse.port | quote }}
-                  - name: CLICKHOUSE_PROPERTIES_FILE
-                    value: /etc/clickhouse/clickhouse.properties
-                  - name: BACKUP_PIPELINES
-                    value: {{ include "durable-clickhouse-sink.backupPipelines" $ | quote }}
-                  - name: RUNTIME_TIMEOUTS
-                    value: {{ include "durable-clickhouse-sink.runtimeTimeouts" $ | quote }}
+                command: ["/bin/durable-clickhouse-backup", "validate-targets", "/etc/durable-clickhouse/target.json"]
                 volumeMounts:
                   - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
+                  - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
             containers:
               - name: register
                 image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
@@ -717,6 +742,9 @@ let
                   items:
                     - key: {{ $.Values.clickhouse.credentialsSecret.propertiesKey }}
                       path: clickhouse.properties
+              - name: runtime-config
+                configMap:
+                  name: {{ include "durable-clickhouse-sink.fullname" $ }}-runtime
               - {name: tmp, emptyDir: {}}
       ---
       {{- if $.Values.connect.deleteConnectorsOnUninstall }}
@@ -793,26 +821,8 @@ let
                   - name: backup
                     image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
                     imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
-                    command: ["/bin/durable-clickhouse-backup", "backup"]
+                    command: ["/bin/durable-clickhouse-backup", "backup", "/etc/durable-clickhouse/backup.json"]
                     env:
-                      - name: CONNECT_URL
-                        value: http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083
-                      - name: CLICKHOUSE_URL
-                        value: {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }}
-                      - name: BACKUP_PIPELINES
-                        value: {{ include "durable-clickhouse-sink.backupPipelines" . | quote }}
-                      - {name: BACKUP_NAMED_COLLECTION, value: {{ .Values.backup.namedCollection | quote }}}
-                      - {name: BACKUP_PATH_PREFIX, value: {{ trimSuffix "/" .Values.backup.pathPrefix | quote }}}
-                      - {name: BACKUP_ARCHIVE_EXTENSION, value: {{ .Values.backup.archiveExtension | quote }}}
-                      - {name: MAX_INCREMENTALS_PER_FULL, value: {{ .Values.backup.maxIncrementalsPerFull | quote }}}
-                      - {name: MAX_BACKUP_BANDWIDTH, value: {{ .Values.backup.maxBandwidthBytesPerSecond | quote }}}
-                      - {name: PAUSE_TIMEOUT_SECONDS, value: {{ .Values.backup.pauseTimeoutSeconds | quote }}}
-                      - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
-                      - {name: KAFKA_BACKUP_CATALOG_TOPIC, value: {{ include "durable-clickhouse-sink.catalogTopic" . | quote }}}
-                      - {name: RUNTIME_TIMEOUTS, value: {{ include "durable-clickhouse-sink.runtimeTimeouts" . | quote }}}
-                      {{- if .Values.kafka.existingSecret }}
-                      - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka-backup/client.properties}
-                      {{- end }}
                       - name: BACKUP_RUN_ID
                         valueFrom:
                           fieldRef:
@@ -829,11 +839,15 @@ let
                             key: {{ .Values.backup.credentialsSecret.passwordKey }}
                     volumeMounts:
                       - {name: tmp, mountPath: /tmp}
+                      - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
                       {{- if .Values.kafka.existingSecret }}
                       - {name: kafka-backup-client, mountPath: /etc/kafka-backup, readOnly: true}
                       {{- end }}
                 volumes:
                   - {name: tmp, emptyDir: {}}
+                  - name: runtime-config
+                    configMap:
+                      name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
                   {{- if .Values.kafka.existingSecret }}
                   - name: kafka-backup-client
                     secret:

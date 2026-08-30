@@ -8,16 +8,26 @@ mod model;
 mod preflight;
 mod snapshot;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Backup { config: PathBuf },
+    ValidateTargets { config: PathBuf },
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let command = std::env::args()
-        .nth(1)
-        .context("expected command: backup or validate-targets")?;
-    match command.as_str() {
-        "backup" => backup::run().await,
-        "validate-targets" => preflight::run().await,
-        _ => bail!("unknown command: {command}"),
+    match Cli::parse().command {
+        Command::Backup { config } => backup::run(&config).await,
+        Command::ValidateTargets { config } => preflight::run(&config).await,
     }
 }

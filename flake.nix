@@ -113,6 +113,8 @@
           --set-string 'pipelines[0].table=records'
           --set backup.enabled=true
           --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
+          --set backup.maxIncrementalsPerFull=2
+          --set backup.maxBandwidthBytesPerSecond=1048576
         )
         helm lint --strict ${packages.chartSource} "''${chart_args[@]}"
         helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
@@ -146,12 +148,12 @@
         grep -F 'validate-targets' rendered.yaml >/dev/null
         grep -F 'async_insert=0,insert_deduplicate=1' rendered.yaml >/dev/null
         grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
-        grep -F 'BACKUP_NAMED_COLLECTION' rendered.yaml >/dev/null
-        grep -F 'BACKUP_PIPELINES' rendered.yaml >/dev/null
-        grep -F 'MAX_INCREMENTALS_PER_FULL' rendered.yaml >/dev/null
-        grep -F 'MAX_BACKUP_BANDWIDTH' rendered.yaml >/dev/null
-        grep -F 'KAFKA_BACKUP_CATALOG_TOPIC' rendered.yaml >/dev/null
-        grep -F 'RUNTIME_TIMEOUTS' rendered.yaml >/dev/null
+        grep -F '/etc/durable-clickhouse/backup.json' rendered.yaml >/dev/null
+        grep -F '/etc/durable-clickhouse/target.json' rendered.yaml >/dev/null
+        grep -F '"maxIncrementalsPerFull": 2' rendered.yaml >/dev/null
+        grep -F '"maxBackupBandwidth": 1048576' rendered.yaml >/dev/null
+        grep -F '"catalogTopic": "test-durable-clickhouse-sink.backup-catalog"' rendered.yaml >/dev/null
+        grep -F '"kafkaTransactionSeconds":30' rendered.yaml >/dev/null
         grep -F 'activeDeadlineSeconds: 21600' rendered.yaml >/dev/null
         grep -F 'activeDeadlineSeconds: 600' rendered.yaml >/dev/null
         grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
