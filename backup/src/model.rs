@@ -2,9 +2,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const RECOVERY_POINT_FORMAT: &str = "durable-clickhouse-sink/recovery-point-v3";
-pub const CHAIN_HEAD_FORMAT: &str = "durable-clickhouse-sink/backup-chain-v3";
-pub const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head_v3";
+pub const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -154,7 +152,6 @@ pub struct BackupDependency {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryPoint {
-    pub format: String,
     pub created_at: String,
     pub backup: BackupReference,
     pub connectors: Vec<ConnectorCheckpoint>,
@@ -163,7 +160,6 @@ pub struct RecoveryPoint {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChainHead {
-    pub format: String,
     pub generation: u64,
     pub chain_id: String,
     pub base: BackupReference,

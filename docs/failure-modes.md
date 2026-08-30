@@ -13,7 +13,7 @@ longer safe. A failed check does not authorize an operator to bypass it.
 | Kafka Connect reports an offset ahead of ClickHouse KeeperMap | Backup fails; KeeperMap remains authoritative. |
 | Input topic is missing, has a different partition count, was truncated past a saved offset, or has a high watermark below it | Backup checks before and after the archive work; restore checks before changing Connect. The operation fails. |
 | Recovery topic has more than one partition | The backup lock and catalog refuse to operate. The managed-topic Job also verifies its partition count. |
-| Another release or pipeline topology reuses the recovery topic | The versioned chain head scope differs and backup fails before pausing connectors. |
+| Another release or pipeline topology reuses the recovery topic | The chain head scope differs and backup fails before pausing connectors. |
 | Target-data backup succeeds but validation or catalog publication fails | No recovery point is committed. Completed S3 objects are unreferenced orphans. Ingestion is already running. |
 | Manifest is malformed, names another backup, duplicates partitions/connectors, or conflicts with existing KeeperMap rows | Restore fails before changing offsets. |
 | One of several Connect offset updates fails | Every connector remains stopped. The restore command is retryable and verifies all offset read-backs before returning success. |

@@ -11,10 +11,9 @@ use crate::{
     connect::{Connect, validate_offsets},
     kafka::KafkaLog,
     model::{
-        BackupDependency, BackupDetails, BackupKind, BackupOutput, BackupReference,
-        CHAIN_HEAD_FORMAT, CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset,
-        KafkaOffsetValue, KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline,
-        RECOVERY_POINT_FORMAT, RecoveryPoint, kafka_name,
+        BackupDependency, BackupDetails, BackupKind, BackupOutput, BackupReference, CHAIN_HEAD_KEY,
+        ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue, KafkaPartition,
+        KeeperCheckpoint, KeeperRow, Pipeline, RecoveryPoint, kafka_name,
     },
     snapshot::SnapshotLayout,
 };
@@ -182,7 +181,6 @@ fn build_recovery_point(
     connectors: Vec<ConnectorCheckpoint>,
 ) -> RecoveryPoint {
     RecoveryPoint {
-        format: RECOVERY_POINT_FORMAT.to_owned(),
         created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         backup: archives.target.clone(),
         connectors,
@@ -263,7 +261,6 @@ fn plan_backup(
 fn next_head(plan: &BackupPlan, backup: BackupReference) -> ChainHead {
     let base = plan.chain_base.clone().unwrap_or_else(|| backup.clone());
     ChainHead {
-        format: CHAIN_HEAD_FORMAT.to_owned(),
         generation: plan.generation,
         chain_id: plan.chain_id.clone(),
         base,
@@ -382,8 +379,7 @@ fn validate_head(head: Option<&ChainHead>, pipelines: &[Pipeline]) -> Result<()>
                 dependency.id != head.latest.id && dependency.name != head.latest.name
             })
     };
-    if head.format != CHAIN_HEAD_FORMAT
-        || head.generation == 0
+    if head.generation == 0
         || head.generation == u64::MAX
         || head.pipelines != pipelines
         || !safe_chain_id(&head.chain_id)
@@ -413,8 +409,7 @@ pub fn validate_recovery_point(point: &RecoveryPoint) -> Result<()> {
         BackupKind::Full => backup.position == 0 && backup.base.is_none(),
         BackupKind::Incremental => backup.position > 0 && backup.base.is_some(),
     };
-    if point.format != RECOVERY_POINT_FORMAT
-        || point.connectors.is_empty()
+    if point.connectors.is_empty()
         || !safe_chain_id(&backup.chain_id)
         || !backup_destination(&backup.name)
         || backup
@@ -608,7 +603,6 @@ mod tests {
             });
         }
         ChainHead {
-            format: CHAIN_HEAD_FORMAT.to_owned(),
             generation: incrementals as u64 + 1,
             chain_id: "chain".to_owned(),
             base: reference(BackupKind::Full, 0),
@@ -852,7 +846,6 @@ mod tests {
 
     fn recovery_point() -> RecoveryPoint {
         RecoveryPoint {
-            format: RECOVERY_POINT_FORMAT.to_owned(),
             created_at: "2026-08-30T12:00:00Z".to_owned(),
             backup: reference(BackupKind::Full, 0),
             connectors: vec![ConnectorCheckpoint {
