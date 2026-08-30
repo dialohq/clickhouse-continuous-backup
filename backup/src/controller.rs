@@ -179,7 +179,7 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
     let mut follow_connectors = Vec::new();
     for (index, checkpoint) in plan.connectors.iter().enumerate() {
         let source_config = context.connect.config(&checkpoint.name).await?;
-        if let Some(targets) = &plan.target_offsets {
+        let (follow_offsets, resume) = if let Some(targets) = &plan.target_offsets {
             let starts = topic_offsets(&plan.start_offsets, &checkpoint.topic);
             let targets = topic_offsets(targets, &checkpoint.topic);
             if starts != targets {
@@ -208,35 +208,23 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
                 .await?;
                 replay_connectors.push(connector);
             }
-            let connector = connector_name(&uid, "follow", index);
-            ensure_follow_connector(
-                context,
-                resource,
-                &source_config,
-                &connector,
-                checkpoint,
-                &targets,
-                index,
-                false,
-            )
-            .await?;
-            follow_connectors.push(connector);
+            (targets, false)
         } else {
-            let connector = connector_name(&uid, "follow", index);
-            let starts = topic_offsets(&plan.start_offsets, &checkpoint.topic);
-            ensure_follow_connector(
-                context,
-                resource,
-                &source_config,
-                &connector,
-                checkpoint,
-                &starts,
-                index,
-                true,
-            )
-            .await?;
-            follow_connectors.push(connector);
-        }
+            (topic_offsets(&plan.start_offsets, &checkpoint.topic), true)
+        };
+        let connector = connector_name(&uid, "follow", index);
+        ensure_follow_connector(
+            context,
+            resource,
+            &source_config,
+            &connector,
+            checkpoint,
+            &follow_offsets,
+            index,
+            resume,
+        )
+        .await?;
+        follow_connectors.push(connector);
     }
     let phase = if plan.target_offsets.is_some() {
         "Complete"
