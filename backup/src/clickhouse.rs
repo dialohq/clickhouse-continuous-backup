@@ -15,6 +15,19 @@ struct TableEngine {
     create_table_query: String,
 }
 
+#[derive(serde::Deserialize)]
+struct RestoreOperation {
+    name: String,
+    status: String,
+    error: String,
+}
+
+pub enum RestoreState {
+    Missing,
+    Running,
+    Restored,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct SettingValue {
     value: String,
@@ -135,6 +148,114 @@ impl ClickHouse {
         self.query(&format!("DROP TABLE IF EXISTS `{database}`.`{table}` SYNC"))
             .await?;
         Ok(())
+    }
+
+    pub async fn ensure_keeper_table(&self, database: &str, table: &str, path: &str) -> Result<()> {
+        let existing: Vec<TableEngine> = self
+            .json_each_row(&format!(
+                "SELECT database, name, engine, create_table_query FROM system.tables WHERE database = '{database}' AND name = '{table}' FORMAT JSONEachRow"
+            ))
+            .await?;
+        match existing.as_slice() {
+            [] => {
+                self.query(&format!(
+                    "CREATE TABLE `{database}`.`{table}` (`key` String, `minOffset` Int64, `maxOffset` Int64, `state` String) ENGINE = KeeperMap('{path}') PRIMARY KEY `key`"
+                ))
+                .await?;
+            }
+            [existing]
+                if existing.engine == "KeeperMap"
+                    && existing
+                        .create_table_query
+                        .contains(&format!("KeeperMap('{path}')")) => {}
+            [existing] => bail!(
+                "recovery state table has an incompatible engine or Keeper path: {database}.{table} ({})",
+                existing.engine
+            ),
+            _ => bail!("ClickHouse returned duplicate state tables: {database}.{table}"),
+        }
+        Ok(())
+    }
+
+    pub async fn insert_keeper_rows(
+        &self,
+        database: &str,
+        table: &str,
+        rows: &[KeeperRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut query = format!("INSERT INTO `{database}`.`{table}` FORMAT JSONEachRow\n");
+        for row in rows {
+            query.push_str(&serde_json::to_string(row)?);
+            query.push('\n');
+        }
+        self.query(&query).await?;
+        Ok(())
+    }
+
+    pub async fn destination_rows(&self, database: &str, table: &str) -> Result<u64> {
+        let engines: Vec<TableEngine> = self
+            .json_each_row(&format!(
+                "SELECT database, name, engine, create_table_query FROM system.tables WHERE database = '{database}' AND name = '{table}' FORMAT JSONEachRow"
+            ))
+            .await?;
+        let [engine] = engines.as_slice() else {
+            bail!("recovery destination must exist exactly once: {database}.{table}")
+        };
+        if !engine.engine.ends_with("MergeTree") {
+            bail!("recovery destination must use a MergeTree-family engine: {database}.{table}")
+        }
+        self.query(&format!("SELECT count() FROM `{database}`.`{table}`"))
+            .await?
+            .trim()
+            .parse()
+            .context("ClickHouse returned an invalid destination row count")
+    }
+
+    pub async fn restore_table(
+        &self,
+        source_database: &str,
+        source_table: &str,
+        destination_database: &str,
+        destination_table: &str,
+        backup: &str,
+        operation_id: &str,
+    ) -> Result<()> {
+        let response = self
+            .query(&format!(
+                "RESTORE TABLE `{source_database}`.`{source_table}` AS `{destination_database}`.`{destination_table}` FROM {backup} SETTINGS allow_different_table_def = true, id = '{operation_id}'"
+            ))
+            .await?;
+        let fields = response.trim_end().split('\t').collect::<Vec<_>>();
+        if fields.len() != 2 || fields[0] != operation_id || fields[1] != "RESTORED" {
+            bail!(
+                "unexpected ClickHouse RESTORE result: {}",
+                response.trim_end()
+            )
+        }
+        Ok(())
+    }
+
+    pub async fn restore_state(&self, operation_id: &str, backup: &str) -> Result<RestoreState> {
+        let operations: Vec<RestoreOperation> = self
+            .json_each_row(&format!(
+                "SELECT name, status, error FROM system.backups WHERE id = '{operation_id}' FORMAT JSONEachRow"
+            ))
+            .await?;
+        let Some(operation) = operations.first() else {
+            return Ok(RestoreState::Missing);
+        };
+        if operations.len() != 1 || operation.name != backup {
+            bail!("ClickHouse restore operation identity conflicts with this recovery")
+        }
+        match operation.status.as_str() {
+            "RESTORING" => Ok(RestoreState::Running),
+            "RESTORED" => Ok(RestoreState::Restored),
+            "RESTORE_FAILED" => bail!("ClickHouse restore failed: {}", operation.error),
+            status => bail!("ClickHouse returned an unknown restore status: {status}"),
+        }
     }
 
     pub async fn require_backup_engines(&self, pipelines: &[Pipeline]) -> Result<()> {

@@ -354,6 +354,8 @@ pub(crate) fn checkpoint(
     }
     Ok(ConnectorCheckpoint {
         name: pipeline.connector.clone(),
+        database: pipeline.database.clone(),
+        table: pipeline.table.clone(),
         topic: pipeline.topic.clone(),
         partitions: pipeline.partitions,
         offsets,
@@ -434,6 +436,8 @@ pub fn validate_manifest(point: &BackupManifest) -> Result<()> {
         validate_offsets(&connector.observed_connect_offsets)?;
         if !kafka_name(&connector.name)
             || !kafka_name(&connector.topic)
+            || !clickhouse_identifier(&connector.database)
+            || !clickhouse_identifier(&connector.table)
             || connector.partitions == 0
             || connector.offsets.len() != connector.partitions as usize
             || !clickhouse_identifier(&connector.keeper.database)
@@ -815,6 +819,8 @@ mod tests {
             backup: reference(BackupKind::Full, 0),
             connectors: vec![ConnectorCheckpoint {
                 name: "records".to_owned(),
+                database: "records".to_owned(),
+                table: "records".to_owned(),
                 topic: "records.input".to_owned(),
                 partitions: 3,
                 offsets: vec![offset(0, 10), offset(1, 0), offset(2, 0)],

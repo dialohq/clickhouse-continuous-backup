@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use rdkafka::{
-    ClientConfig, Message,
+    ClientConfig, Message, Offset, TopicPartitionList,
     consumer::{Consumer, StreamConsumer},
     producer::{FutureProducer, FutureRecord, Producer},
 };
@@ -138,6 +138,64 @@ impl Catalog {
         }
         self.producer.commit_transaction(self.transaction_timeout)?;
         Ok(())
+    }
+}
+
+pub async fn lookup(
+    bootstrap_servers: &str,
+    properties: &HashMap<String, String>,
+    topic: &str,
+    key: &str,
+    identity: &str,
+    timeouts: &RuntimeTimeouts,
+) -> Result<Option<String>> {
+    let mut config = ClientConfig::new();
+    for (name, value) in properties {
+        config.set(name, value);
+    }
+    let consumer: StreamConsumer = config
+        .set("bootstrap.servers", bootstrap_servers)
+        .set("group.id", format!("{topic}.recovery-{identity}"))
+        .set("enable.auto.commit", "false")
+        .set("isolation.level", "read_committed")
+        .set("enable.partition.eof", "true")
+        .set(
+            "max.poll.interval.ms",
+            timeouts.kafka_max_poll.as_millis().to_string(),
+        )
+        .create()?;
+    let metadata = consumer.fetch_metadata(Some(topic), timeouts.kafka_metadata)?;
+    let [metadata] = metadata.topics() else {
+        bail!("Kafka did not return exactly one recovery topic")
+    };
+    if let Some(error) = metadata.error() {
+        bail!("Kafka recovery-topic metadata failed: {error:?}")
+    }
+    if metadata.partitions().len() != 1 {
+        bail!("the recovery topic must have exactly one partition")
+    }
+    let (low, high) = consumer.fetch_watermarks(topic, 0, timeouts.kafka_metadata)?;
+    if low < 0 || high < low {
+        bail!("Kafka returned invalid recovery-topic watermarks: {low}..{high}")
+    }
+    if low == high {
+        return Ok(None);
+    }
+    let mut assignment = TopicPartitionList::new();
+    assignment.add_partition_offset(topic, 0, Offset::Offset(low))?;
+    consumer.assign(&assignment)?;
+    let mut value = None;
+    loop {
+        match tokio::time::timeout(timeouts.kafka_catalog_read, consumer.recv()).await {
+            Ok(Ok(message)) => {
+                if inspect(&message, key, high, &mut value) {
+                    return Ok(value);
+                }
+            }
+            Ok(Err(rdkafka::error::KafkaError::PartitionEOF(_))) => return Ok(value),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => bail!("timed out reading recovery catalog"),
+        }
     }
 }
 

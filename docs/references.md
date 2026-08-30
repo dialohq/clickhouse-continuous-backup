@@ -7,6 +7,8 @@ not only this repository's summaries.
 
 - [Kafka Connect user guide and REST API](https://kafka.apache.org/42/kafka-connect/)
 - [Kafka Connect offset-management API (KIP-875)](https://cwiki.apache.org/confluence/display/KAFKA/KIP-875%3A+First-class+Offsets+Support+in+Kafka+Connect)
+- [Kafka transactional consume-transform-produce contract](https://kafka.apache.org/42/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html)
+- [Kafka Connect connectors created in a stopped state (KIP-980)](https://cwiki.apache.org/confluence/display/KAFKA/KIP-980%3A+Allow+creating+connectors+in+a+stopped+state)
 - [ClickHouse Kafka Connect sink documentation](https://clickhouse.com/docs/integrations/connectors/data-ingestion/kafka/kafka-clickhouse-connect-sink)
 - [ClickHouse Kafka Connect exactly-once design](https://github.com/ClickHouse/clickhouse-kafka-connect/blob/main/docs/DESIGN.md)
 - [ClickHouse insert deduplication on retries and finite-window behavior](https://clickhouse.com/docs/guides/developer/deduplicating-inserts-on-retries)
@@ -20,7 +22,11 @@ not only this repository's summaries.
 - [ClickHouse named collections](https://clickhouse.com/docs/operations/named-collections)
 - [ClickHouse incremental backup dependency contract](https://github.com/ClickHouse/clickhouse-docs/blob/main/docs/operations_/backup_restore/01_local_disk.md#incremental-backups)
 - [ClickHouse copy-on-write table cloning](https://clickhouse.com/blog/table-cloning)
+- [ClickHouse restore into pre-created tables with `allow_different_table_def`](https://github.com/ClickHouse/ClickHouse/issues/48846#issuecomment-1514458326)
+- [ClickHouse partial-restore retry ambiguity after an I/O failure](https://github.com/ClickHouse/ClickHouse/issues/114593)
 - [ClickHouse external-backup lifecycle ownership](https://clickhouse.com/blog/introducing-external-backups-on-clickhouse-cloud)
+- [CloudNativePG recovery bootstraps a new cluster from an immutable backup source](https://cloudnative-pg.io/documentation/1.28/bootstrap/)
+- [CloudNativePG point-in-time recovery targets](https://cloudnative-pg.io/documentation/1.28/recovery/)
 
 ## Production experience
 

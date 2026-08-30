@@ -34,7 +34,11 @@ The Kafka principal needs read access to configured input topics and access to
 the Connect internal and consumer-offset resources it owns. The backup Job
 needs read/write access to the backup catalog topic, transactional-ID access
 for its manifest transaction, and consumer-group access to the topic-derived
-`<backup-catalog-topic>.backup-lock` group.
+`<backup-catalog-topic>.backup-lock` group. The recovery controller needs read access
+to source topics, read/write/create access to its UID-derived replay topics,
+consumer-group access to its UID-derived replay groups, and transactional-ID
+access to its UID-derived copy producers. It never needs write access to source
+topics.
 Topic-management privileges are needed only when `topics.manage=true`.
 
 ## ClickHouse writer
@@ -68,7 +72,10 @@ TABLE` and `DROP TABLE` for temporary copy-on-write snapshots, access to
 `system.backups` and `system.tables`, and ClickHouse's `BACKUP` permission for
 the snapshot objects. It also reads `system.merge_tree_settings` to reject a
 disabled effective replicated deduplication window. The backup identity should
-not be the ingestion writer.
+not be the ingestion writer. The recovery identity needs
+`RESTORE` on the selected archive, `SELECT` on destination tables and
+`system.tables`, and `CREATE TABLE`, `SELECT`, and `INSERT` for isolated
+KeeperMap tables. It should not be the ingestion writer either.
 
 RGW/S3 credentials are not passed through Helm. Configure
 `backup.namedCollection` on every ClickHouse server. The
@@ -88,4 +95,9 @@ controller; the chart itself does not assume one.
 
 Short-lived credentials are safe only when the external issuer, Secret sync,
 and restart controller are tested together. Prefer renewable credentials whose
-lease comfortably exceeds the maximum restart and backup duration.
+lease comfortably exceeds the maximum restart and incident-recovery time.
+
+The recovery controller is the only workload that mounts a Kubernetes service
+account token. Its namespaced Role can read `TableRecovery` objects and update
+only their status subresource. Connect, topic jobs, and backup jobs keep service
+account token automount disabled.

@@ -1,5 +1,9 @@
-{lib, symlinkJoin, writeTextDir}:
+{backup, lib, runCommand, symlinkJoin, writeTextDir}:
 let
+  recoveryCrd = runCommand "durable-clickhouse-sink-recovery-crd" {} ''
+    mkdir -p $out/crds
+    ${backup}/bin/durable-clickhouse-backup print-recovery-crd > $out/crds/table-recovery.yaml
+  '';
   files = {
     "Chart.yaml" = ''
       apiVersion: v2
@@ -71,6 +75,9 @@ let
         kafkaCatalogReadSeconds: 15
         kafkaTransactionSeconds: 30
         kafkaMaxPollSeconds: 86400
+        kafkaReplayPollSeconds: 15
+        recoveryCatchupSeconds: 3600
+        controllerRetrySeconds: 15
         hookJobSeconds: 600
 
       topics:
@@ -98,6 +105,17 @@ let
         successfulJobsHistoryLimit: 3
         failedJobsHistoryLimit: 3
 
+      recovery:
+        replayTopicReplicationFactor: 3
+        replayTopicRetentionMs: 604800000
+        replayBatchRecords: 500
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 512Mi
+
       pipelines: []
       # - name: records
       #   topic: records.input
@@ -113,7 +131,7 @@ let
     "values.schema.json" = builtins.toJSON {
       "$schema" = "https://json-schema.org/draft/2020-12/schema";
       type = "object";
-      required = ["kafka" "clickhouse" "timeouts" "pipelines"];
+      required = ["kafka" "clickhouse" "timeouts" "recovery" "pipelines"];
       properties = {
         stateNamespace = {type = "string"; pattern = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"; maxLength = 30;};
         kafka = {
@@ -176,6 +194,9 @@ let
             "kafkaCatalogReadSeconds"
             "kafkaTransactionSeconds"
             "kafkaMaxPollSeconds"
+            "kafkaReplayPollSeconds"
+            "recoveryCatchupSeconds"
+            "controllerRetrySeconds"
             "hookJobSeconds"
           ];
           properties = {
@@ -188,6 +209,9 @@ let
             kafkaCatalogReadSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             kafkaTransactionSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             kafkaMaxPollSeconds = {type = "integer"; minimum = 1; maximum = 604800;};
+            kafkaReplayPollSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            recoveryCatchupSeconds = {type = "integer"; minimum = 1; maximum = 604800;};
+            controllerRetrySeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             hookJobSeconds = {type = "integer"; minimum = 1; maximum = 86400;};
           };
         };
@@ -217,6 +241,16 @@ let
             };
             successfulJobsHistoryLimit = {type = "integer"; minimum = 0;};
             failedJobsHistoryLimit = {type = "integer"; minimum = 0;};
+          };
+        };
+        recovery = {
+          type = "object";
+          required = ["replayTopicReplicationFactor" "replayTopicRetentionMs" "replayBatchRecords"];
+          properties = {
+            replayTopicReplicationFactor = {type = "integer"; minimum = 1;};
+            replayTopicRetentionMs = {type = "integer"; minimum = 60000;};
+            replayBatchRecords = {type = "integer"; minimum = 1; maximum = 100000;};
+            resources = {type = "object";};
           };
         };
       };
@@ -294,14 +328,17 @@ let
         "kafkaCatalogAcquireSeconds" .Values.timeouts.kafkaCatalogAcquireSeconds
         "kafkaCatalogReadSeconds" .Values.timeouts.kafkaCatalogReadSeconds
         "kafkaTransactionSeconds" .Values.timeouts.kafkaTransactionSeconds
-        "kafkaMaxPollSeconds" .Values.timeouts.kafkaMaxPollSeconds) -}}
+        "kafkaMaxPollSeconds" .Values.timeouts.kafkaMaxPollSeconds
+        "kafkaReplayPollSeconds" .Values.timeouts.kafkaReplayPollSeconds
+        "recoveryCatchupSeconds" .Values.timeouts.recoveryCatchupSeconds
+        "controllerRetrySeconds" .Values.timeouts.controllerRetrySeconds) -}}
       {{- end }}
     '';
 
     "templates/validate.yaml" = ''
       {{- $names := dict -}}
       {{- $topics := dict -}}
-      {{- $reserved := list "connector.class" "tasks.max" "topics" "topic2TableMap" "hostname" "port" "ssl" "database" "username" "password" "exactlyOnce" "errors.tolerance" "bufferCount" "consumer.override.isolation.level" "zkPath" "zkDatabase" -}}
+      {{- $reserved := list "connector.class" "tasks.max" "topics" "topics.regex" "topic2TableMap" "hostname" "port" "ssl" "database" "username" "password" "exactlyOnce" "errors.tolerance" "bufferCount" "consumer.override.group.id" "consumer.override.isolation.level" "zkPath" "zkDatabase" -}}
       {{- range $pipeline := .Values.pipelines }}
       {{- if hasKey $names $pipeline.name }}
       {{- fail (printf "pipeline names must be unique: %s" $pipeline.name) }}
@@ -859,6 +896,120 @@ let
       {{- end }}
     '';
 
+    "templates/recovery-controller.yaml" = ''
+      {{- if .Values.backup.enabled }}
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+        labels:
+          {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+      rules:
+        - apiGroups: ["chbackup.dialo.ai"]
+          resources: ["tablerecoveries"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["chbackup.dialo.ai"]
+          resources: ["tablerecoveries/status"]
+          verbs: ["get", "patch", "update"]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+        labels:
+          {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+      subjects:
+        - kind: ServiceAccount
+          name: {{ include "durable-clickhouse-sink.fullname" . }}
+          namespace: {{ .Release.Namespace }}
+      ---
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+        labels:
+          {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+          app.kubernetes.io/component: recovery-controller
+      spec:
+        replicas: 1
+        strategy: {type: Recreate}
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: recovery-controller
+        template:
+          metadata:
+            labels:
+              {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
+              app.kubernetes.io/component: recovery-controller
+          spec:
+            serviceAccountName: {{ include "durable-clickhouse-sink.fullname" . }}
+            automountServiceAccountToken: true
+            securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+            {{- with .Values.imagePullSecrets }}
+            imagePullSecrets:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+            containers:
+              - name: controller
+                image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+                imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+                command: ["/bin/durable-clickhouse-backup", "recovery-controller"]
+                resources:
+                  {{- toYaml .Values.recovery.resources | nindent 18 }}
+                env:
+                  - name: POD_NAMESPACE
+                    valueFrom:
+                      fieldRef: {fieldPath: metadata.namespace}
+                  - name: CONNECT_URL
+                    value: http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083
+                  - name: CLICKHOUSE_URL
+                    value: {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }}
+                  - {name: CLICKHOUSE_CONNECTOR_HOST, value: {{ .Values.clickhouse.host | quote }}}
+                  - {name: CLICKHOUSE_CONNECTOR_PORT, value: {{ .Values.clickhouse.port | quote }}}
+                  - {name: CLICKHOUSE_CONNECTOR_SECURE, value: {{ .Values.clickhouse.secure | quote }}}
+                  - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
+                  - {name: KAFKA_BACKUP_CATALOG_TOPIC, value: {{ include "durable-clickhouse-sink.catalogTopic" . | quote }}}
+                  - {name: REPLAY_TOPIC_REPLICATION_FACTOR, value: {{ int .Values.recovery.replayTopicReplicationFactor | quote }}}
+                  - {name: REPLAY_TOPIC_RETENTION_MS, value: {{ int64 .Values.recovery.replayTopicRetentionMs | quote }}}
+                  - {name: REPLAY_BATCH_RECORDS, value: {{ int .Values.recovery.replayBatchRecords | quote }}}
+                  - {name: RUNTIME_TIMEOUTS, value: {{ include "durable-clickhouse-sink.runtimeTimeouts" . | quote }}}
+                  {{- if .Values.kafka.existingSecret }}
+                  - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka-recovery/client.properties}
+                  {{- end }}
+                  - name: CLICKHOUSE_USERNAME
+                    valueFrom:
+                      secretKeyRef:
+                        name: {{ .Values.backup.credentialsSecret.name }}
+                        key: {{ .Values.backup.credentialsSecret.usernameKey }}
+                  - name: CLICKHOUSE_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: {{ .Values.backup.credentialsSecret.name }}
+                        key: {{ .Values.backup.credentialsSecret.passwordKey }}
+                volumeMounts:
+                  - {name: tmp, mountPath: /tmp}
+                  {{- if .Values.kafka.existingSecret }}
+                  - {name: kafka-recovery-client, mountPath: /etc/kafka-recovery, readOnly: true}
+                  {{- end }}
+            volumes:
+              - {name: tmp, emptyDir: {}}
+              {{- if .Values.kafka.existingSecret }}
+              - name: kafka-recovery-client
+                secret:
+                  secretName: {{ .Values.kafka.existingSecret }}
+                  items:
+                    - key: {{ .Values.backup.kafkaPropertiesKey }}
+                      path: client.properties
+              {{- end }}
+      {{- end }}
+    '';
+
     "templates/NOTES.txt" = ''
       Durable ClickHouse Sink is configured for {{ len .Values.pipelines }} pipeline(s).
 
@@ -873,5 +1024,5 @@ let
 in
 symlinkJoin {
   name = "durable-clickhouse-sink-chart-source";
-  paths = lib.mapAttrsToList writeTextDir files;
+  paths = (lib.mapAttrsToList writeTextDir files) ++ [recoveryCrd];
 }

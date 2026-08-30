@@ -17,6 +17,11 @@ longer safe. A failed check does not authorize an operator to bypass it.
 | Target-data backup succeeds but validation or catalog publication fails | No backup manifest is committed. Completed S3 objects are unreferenced orphans. Ingestion is already running. |
 | Object-store or ClickHouse backup error | `system.backups` must report the exact ID, destination, sizes, and `BACKUP_CREATED`; otherwise no manifest is committed. |
 | Incremental chain limit is reached | The next point starts a new full chain. |
+| Declarative recovery target is partial, duplicated, before the checkpoint, beyond a log end, or removed by retention | The controller fails before restoring data. |
+| Bounded-copy consumer progress expires while committed replay records remain, or its replay topic is recreated after progress | Recovery fails closed instead of risking a gap or duplicate copy. |
+| Source retention passes the next transactional-copy offset, or bounded-topic retention advances before ingestion is verified | Recovery fails instead of accepting an incomplete destination. Recovery connectors disable automatic offset reset. |
+| Controller or broker dies during bounded copy | Kafka aborts the open transaction; `read_committed` hides it and reconciliation resumes from the atomically committed source offset. |
+| A destination is non-empty while its resource remains in `Restoring` | The controller continues only if `system.backups` confirms `RESTORED` for the resource UID. Missing or failed operation evidence fails closed; use a new empty destination and resource. |
 
 ## Boundaries that cannot be made atomic
 
@@ -52,6 +57,10 @@ connectors.
 - Credentials and ACLs can expire or be revoked while a Job is running. The Job
   fails and a new pod reads the rotated Secret; Connect workers require a
   rollout to reload file-provider credentials.
+- `Complete` and `Streaming` are terminal reconciliation phases, not continuous
+  Kafka Connect health checks. Monitor connector/task state and lag separately.
+  Manual changes made after a terminal phase are not reverted by the
+  controller.
 
 The exact contract and drill procedure are in [Guarantees](guarantees.md),
 [Backup procedure](backup-procedure.md), and [Test plan](testing.md).

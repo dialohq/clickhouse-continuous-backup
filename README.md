@@ -98,6 +98,7 @@ them as a routine Helm change.
 - [Failure modes and unhandled boundaries](docs/failure-modes.md)
 - [Schema contract](docs/schema.md)
 - [Authentication and credential rotation](docs/authentication.md)
+- [Declarative table recovery and point-in-time replay](docs/table-recovery.md)
 - [Backup procedure](docs/backup-procedure.md)
 - [Test plan](docs/testing.md)
 - [External design references](docs/references.md)

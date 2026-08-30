@@ -134,6 +134,7 @@ helm --kubeconfig "$kubeconfig" upgrade --install sink "$chart" \
   --namespace "$namespace" --values "$values" --wait --timeout 10m
 
 wait_for_ready_pod app.kubernetes.io/component=connect
+wait_for_ready_pod app.kubernetes.io/component=recovery-controller
 
 clickhouse() {
   k -n "$namespace" exec clickhouse-0 -- clickhouse-client --query "$1"
@@ -314,7 +315,124 @@ fi
 start_producer final-records 1201 1250
 k -n "$namespace" wait pod/final-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 wait_count 1250 'SELECT count() FROM durable_e2e.records'
+
+target_offsets=$(k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
+  /bin/kafka-get-offsets.sh --bootstrap-server redpanda:9092 --topic records.input --time -1 |
+  jq --raw-input --slurp 'split("\n") | map(select(length > 0) | split(":") | {topic: .[0], partition: (.[1] | tonumber), offset: (.[2] | tonumber)})')
+
+apply_table_recovery() {
+  local name=$1 table=$2 targets=${3:-}
+  if [[ -n $targets ]]; then
+    jq -n --arg name "$name" --arg table "$table" --arg id "$backup_id" --argjson targets "$targets" '{
+      apiVersion: "chbackup.dialo.ai/v1alpha1",
+      kind: "TableRecovery",
+      metadata: {name: $name},
+      spec: {
+        source: {database: "durable_e2e", table: "records", recoveryPointID: $id},
+        destination: {database: "durable_e2e", table: $table},
+        targetOffsets: $targets
+      }
+    }' | k -n "$namespace" apply -f -
+  else
+    jq -n --arg name "$name" --arg table "$table" --arg id "$backup_id" '{
+      apiVersion: "chbackup.dialo.ai/v1alpha1",
+      kind: "TableRecovery",
+      metadata: {name: $name},
+      spec: {
+        source: {database: "durable_e2e", table: "records", recoveryPointID: $id},
+        destination: {database: "durable_e2e", table: $table}
+      }
+    }' | k -n "$namespace" apply -f -
+  fi
+}
+
+wait_recovery() {
+  local name=$1 phase=$2
+  k -n "$namespace" wait "tablerecovery/$name" \
+    --for="jsonpath={.status.phase}=$phase" --timeout=900s
+}
+
+partial_offsets=$(jq '.[0:-1]' <<<"$target_offsets")
+apply_table_recovery invalid-partial invalid_partial_records "$partial_offsets"
+k -n "$namespace" wait tablerecovery/invalid-partial \
+  --for=jsonpath='{.status.conditions[0].reason}'=ReconcileFailed --timeout=300s
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.invalid_partial_records') == 0 ]]
+
+future_offsets=$(jq '.[0].offset += 1' <<<"$target_offsets")
+apply_table_recovery invalid-future invalid_future_records "$future_offsets"
+k -n "$namespace" wait tablerecovery/invalid-future \
+  --for=jsonpath='{.status.conditions[0].reason}'=ReconcileFailed --timeout=300s
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.invalid_future_records') == 0 ]]
+
+apply_table_recovery bounded-pitr pitr_records "$target_offsets"
+for _ in {1..120}; do
+  recovery_phase=$(k -n "$namespace" get tablerecovery/bounded-pitr -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  [[ $recovery_phase == Replaying ]] && break
+  [[ $recovery_phase == Complete ]] && break
+  sleep 1
+done
+if [[ $recovery_phase == Replaying ]]; then
+  k -n "$namespace" delete pod -l app.kubernetes.io/component=recovery-controller --grace-period=0 --force --wait=false
+  wait_for_ready_pod app.kubernetes.io/component=recovery-controller
+fi
+wait_recovery bounded-pitr Complete
+wait_count 1250 'SELECT count() FROM durable_e2e.pitr_records'
+wait_count 1250 'SELECT uniqExact(record_key) FROM durable_e2e.pitr_records'
+bounded_follow=$(k -n "$namespace" get tablerecovery/bounded-pitr -o jsonpath='{.status.followConnectors[0]}')
+bounded_state=$(k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
+  curl --fail --silent "http://localhost:8083/connectors/$bounded_follow/status" | jq -r '.connector.state')
+[[ $bounded_state == STOPPED ]]
+
+k -n "$namespace" scale deployment/sink-durable-clickhouse-sink-recovery --replicas=0
+for _ in {1..120}; do
+  [[ -z $(k -n "$namespace" get pods -l app.kubernetes.io/component=recovery-controller -o name) ]] && break
+  sleep 1
+done
+[[ -z $(k -n "$namespace" get pods -l app.kubernetes.io/component=recovery-controller -o name) ]]
+apply_table_recovery ambiguous-restore ambiguous_restore_records "$target_offsets"
+k -n "$namespace" patch tablerecovery/ambiguous-restore --subresource=status --type=merge \
+  --patch '{"status":{"phase":"Restoring"}}'
+clickhouse "INSERT INTO durable_e2e.ambiguous_restore_records VALUES ('ambiguous', now64(3), 'partial')"
+apply_table_recovery live-follow live_records
+live_uid=$(k -n "$namespace" get tablerecovery/live-follow -o jsonpath='{.metadata.uid}')
+live_token=${live_uid//-/}
+live_connector="dcs-$live_token-follow-0"
+live_state_table="dcs_recovery_${live_token}_follow_0_state"
+live_keeper_path="/durable-clickhouse-sink/recovery/$live_token/follow/0"
+clickhouse "CREATE TABLE durable_e2e.$live_state_table (key String, minOffset Int64, maxOffset Int64, state String) ENGINE = KeeperMap('$live_keeper_path') PRIMARY KEY key"
+live_config=$(connector_request GET /config | jq \
+  --arg table "$live_state_table" --arg path "$live_keeper_path" '
+    del(.name, ."topics.regex", ."consumer.override.group.id") |
+    .topics = "records.input" |
+    .topic2TableMap = "records.input=live_records" |
+    .hostname = "clickhouse.durable-sink-e2e.svc.cluster.local" |
+    .port = "8123" |
+    .ssl = "false" |
+    .database = "durable_e2e" |
+    .zkPath = $path |
+    .zkDatabase = $table |
+    ."consumer.override.isolation.level" = "read_committed" |
+    ."consumer.override.auto.offset.reset" = "none"
+  ')
+jq -n --arg name "$live_connector" --argjson config "$live_config" \
+  '{name: $name, config: $config, initial_state: "STOPPED"}' |
+  k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
+    curl --fail --silent --show-error --header 'Content-Type: application/json' \
+      --data-binary @- http://localhost:8083/connectors >/dev/null
+k -n "$namespace" scale deployment/sink-durable-clickhouse-sink-recovery --replicas=1
+wait_for_ready_pod app.kubernetes.io/component=recovery-controller
+k -n "$namespace" wait tablerecovery/ambiguous-restore \
+  --for=jsonpath='{.status.conditions[0].reason}'=ReconcileFailed --timeout=300s
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.ambiguous_restore_records') == 1 ]]
+wait_recovery live-follow Streaming
+wait_count 1250 'SELECT count() FROM durable_e2e.live_records'
+start_producer live-follow-records 1251 1260
+k -n "$namespace" wait pod/live-follow-records --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+wait_count 1260 'SELECT count() FROM durable_e2e.records'
+wait_count 1260 'SELECT count() FROM durable_e2e.live_records'
+wait_count 1260 'SELECT uniqExact(record_key) FROM durable_e2e.live_records'
+
 rollover_output=$(run_backup e2e-backup-rollover)
 jq --exit-status '.manifest.backup.kind == "full" and .manifest.backup.position == 0' <<<"$rollover_output" >/dev/null
 
-echo "RKE2 E2E passed: crash retries, ingestion during snapshot upload, immutable backup restore probe, exact backup manifest, and full/incremental rollover"
+echo "RKE2 E2E passed: crash retries, snapshot concurrency, incremental rollover, adversarial offset rejection, bounded PITR restart, live follow, KeeperMap rehydration, tail replay, and restore cutover"

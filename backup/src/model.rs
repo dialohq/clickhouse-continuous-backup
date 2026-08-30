@@ -135,6 +135,8 @@ pub struct KeeperCheckpoint {
 #[serde(deny_unknown_fields)]
 pub struct ConnectorCheckpoint {
     pub name: String,
+    pub database: String,
+    pub table: String,
     pub topic: String,
     pub partitions: u32,
     pub offsets: Vec<KafkaOffset>,

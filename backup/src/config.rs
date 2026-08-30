@@ -52,6 +52,21 @@ pub struct RuntimeTimeouts {
     pub kafka_transaction: Duration,
     #[serde(rename = "kafkaMaxPollSeconds", deserialize_with = "positive_seconds")]
     pub kafka_max_poll: Duration,
+    #[serde(
+        rename = "kafkaReplayPollSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub kafka_replay_poll: Duration,
+    #[serde(
+        rename = "recoveryCatchupSeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub recovery_catchup: Duration,
+    #[serde(
+        rename = "controllerRetrySeconds",
+        deserialize_with = "positive_seconds"
+    )]
+    pub controller_retry: Duration,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -89,6 +104,30 @@ pub struct TargetConfig {
     #[serde(skip)]
     pub clickhouse_password: String,
     pub pipelines: Vec<Pipeline>,
+    pub timeouts: RuntimeTimeouts,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerConfig {
+    #[serde(skip)]
+    pub namespace: String,
+    pub connect_url: String,
+    pub clickhouse_url: String,
+    clickhouse_properties_file: PathBuf,
+    #[serde(skip)]
+    pub clickhouse_username: String,
+    #[serde(skip)]
+    pub clickhouse_password: String,
+    pub clickhouse_connector_host: String,
+    pub clickhouse_connector_port: u16,
+    pub clickhouse_connector_secure: bool,
+    pub kafka_bootstrap_servers: String,
+    pub kafka_properties_file: Option<PathBuf>,
+    pub catalog_topic: String,
+    pub replay_topic_replication_factor: i32,
+    pub replay_topic_retention_ms: u64,
+    pub replay_batch_records: usize,
     pub timeouts: RuntimeTimeouts,
 }
 
@@ -142,6 +181,30 @@ impl TargetConfig {
             .context("ClickHouse username property is required")?;
         config.clickhouse_password = credentials.get("password").cloned().unwrap_or_default();
         Ok(config)
+    }
+}
+
+impl ControllerConfig {
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let mut config: Self = read_config(path)?;
+        if config.replay_topic_replication_factor <= 0 {
+            bail!("replayTopicReplicationFactor must be a positive integer")
+        }
+        if config.replay_batch_records == 0 {
+            bail!("replayBatchRecords must be a positive integer")
+        }
+        config.namespace = required("POD_NAMESPACE")?;
+        let credentials = read_properties(&config.clickhouse_properties_file, "ClickHouse")?;
+        config.clickhouse_username = credentials
+            .get("username")
+            .cloned()
+            .context("ClickHouse username property is required")?;
+        config.clickhouse_password = credentials.get("password").cloned().unwrap_or_default();
+        Ok(config)
+    }
+
+    pub fn kafka_properties(&self) -> Result<HashMap<String, String>> {
+        read_kafka_properties(self.kafka_properties_file.as_ref())
     }
 }
 
@@ -213,7 +276,10 @@ mod tests {
         "kafkaCatalogAcquireSeconds": 30,
         "kafkaCatalogReadSeconds": 15,
         "kafkaTransactionSeconds": 30,
-        "kafkaMaxPollSeconds": 86400
+        "kafkaMaxPollSeconds": 86400,
+        "kafkaReplayPollSeconds": 15,
+        "recoveryCatchupSeconds": 3600,
+        "controllerRetrySeconds": 15
     }"#;
 
     #[test]

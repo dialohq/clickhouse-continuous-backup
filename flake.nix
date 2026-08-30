@@ -26,7 +26,7 @@
       pkgs = import nixpkgs {inherit system;};
       backup = pkgs.callPackage ./nix/backup.nix {};
       images = import ./nix/images.nix {inherit pkgs system backup nix2container;};
-      chartSource = pkgs.callPackage ./nix/chart.nix {};
+      chartSource = pkgs.callPackage ./nix/chart.nix {inherit backup;};
       chart = pkgs.runCommand "durable-clickhouse-sink-chart-0.1.0" {nativeBuildInputs = [pkgs.kubernetes-helm];} ''
         mkdir -p $out
         helm package ${chartSource} --destination $out
@@ -72,6 +72,11 @@
           maxIncrementalsPerFull = 2;
           maxBandwidthBytesPerSecond = 262144;
           credentialsSecret.name = "clickhouse-credentials";
+        };
+        recovery = {
+          replayTopicReplicationFactor = 1;
+          replayTopicRetentionMs = 3600000;
+          replayBatchRecords = 1;
         };
         pipelines = [{
           name = "records";
@@ -130,10 +135,15 @@
           fi
         }
         expect_rejected --set-string 'pipelines[0].connectorConfig.exactlyOnce=false'
+        expect_rejected --set-string 'pipelines[0].connectorConfig.consumer\.override\.group\.id=shared'
+        expect_rejected --set-string 'pipelines[0].connectorConfig.topics\.regex=.*'
         expect_rejected --set backup.pauseTimeoutSeconds=0
         expect_rejected --set backup.activeDeadlineSeconds=0
         expect_rejected --set backup.terminationGracePeriodSeconds=15
         expect_rejected --set timeouts.kafkaTransactionSeconds=0
+        expect_rejected --set recovery.replayTopicReplicationFactor=0
+        expect_rejected --set recovery.replayTopicRetentionMs=0
+        expect_rejected --set recovery.replayBatchRecords=0
         expect_rejected --set-string "backup.pathPrefix=invalid')"
         expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
         expect_rejected --set-string 'pipelines[1].name=records' \
@@ -160,6 +170,12 @@
         grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F '.backup-catalog' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
+        grep -F 'component: recovery-controller' rendered.yaml >/dev/null
+        grep -F 'resources: ["tablerecoveries/status"]' rendered.yaml >/dev/null
+        grep -F 'name: REPLAY_TOPIC_RETENTION_MS' rendered.yaml >/dev/null
+        grep -F 'value: "604800000"' rendered.yaml >/dev/null
+        grep -F 'recoveryPointID:' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
+        grep -F 'rule: self == oldSelf' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
         touch $out
       '';
     });
@@ -174,6 +190,14 @@
           pkgs.kubernetes-helm
           pkgs.containerd
           pkgs.rke2
+          pkgs.cargo
+          pkgs.clippy
+          pkgs.cyrus_sasl
+          pkgs.openssl
+          pkgs.pkg-config
+          pkgs.rdkafka
+          pkgs.rustc
+          pkgs.rustfmt
         ];
       };
     });
