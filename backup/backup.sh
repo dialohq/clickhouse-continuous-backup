@@ -10,12 +10,16 @@ set -euo pipefail
 : "${BACKUP_ARCHIVE_EXTENSION:?BACKUP_ARCHIVE_EXTENSION is required}"
 : "${BACKUP_RUN_ID:?BACKUP_RUN_ID is required}"
 : "${PAUSE_TIMEOUT_SECONDS:?PAUSE_TIMEOUT_SECONDS is required}"
+: "${KAFKA_BOOTSTRAP_SERVERS:?KAFKA_BOOTSTRAP_SERVERS is required}"
+: "${KAFKA_RECOVERY_TOPIC:?KAFKA_RECOVERY_TOPIC is required}"
 
 curl_bin=${CURL_BIN:-curl}
 jq_bin=${JQ_BIN:-jq}
 sleep_bin=${SLEEP_BIN:-sleep}
 date_bin=${DATE_BIN:-date}
+kafka_producer_bin=${KAFKA_PRODUCER_BIN:-kafka-console-producer.sh}
 curl_config=${CLICKHOUSE_CURL_CONFIG:-/etc/clickhouse/curl.config}
+kafka_config=${KAFKA_PROPERTIES_FILE:-}
 
 [[ $PAUSE_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]] || {
   echo "PAUSE_TIMEOUT_SECONDS must be a positive integer" >&2
@@ -114,6 +118,35 @@ for connector in "${connectors[@]}"; do
   done
 done
 
+offset_snapshots='[]'
+for connector in "${connectors[@]}"; do
+  snapshot=$(connect_request "$CONNECT_URL/connectors/$connector/offsets")
+  if ! "$jq_bin" --exit-status '
+    (.offsets | type == "array") and
+    ([.offsets[] |
+      ((.partition.kafka_topic | type) == "string") and
+      ((.partition.kafka_partition | type) == "number") and
+      (.partition.kafka_partition >= 0) and
+      ((.partition.kafka_partition | floor) == .partition.kafka_partition) and
+      ((.offset.kafka_offset | type) == "number") and
+      (.offset.kafka_offset >= 0) and
+      ((.offset.kafka_offset | floor) == .offset.kafka_offset)
+    ] | all) and
+    (([.offsets[].partition | [.kafka_topic, .kafka_partition]] | length) ==
+     ([.offsets[].partition | [.kafka_topic, .kafka_partition]] | unique | length))
+  ' <<<"$snapshot" >/dev/null; then
+    echo "connector returned invalid offsets: $connector" >&2
+    exit 1
+  fi
+  offset_snapshots=$(
+    "$jq_bin" --compact-output --null-input \
+      --argjson snapshots "$offset_snapshots" \
+      --arg connector "$connector" \
+      --argjson snapshot "$snapshot" \
+      '$snapshots + [{name: $connector, offsets: $snapshot.offsets}]'
+  )
+done
+
 stamp=$($date_bin -u +%Y%m%dT%H%M%SZ)
 destination="S3($BACKUP_NAMED_COLLECTION, '$BACKUP_PATH_PREFIX/$stamp-$BACKUP_RUN_ID.$BACKUP_ARCHIVE_EXTENSION')"
 result=
@@ -132,4 +165,30 @@ if ! "$jq_bin" --exit-status --arg destination "$destination" \
   echo "ClickHouse did not confirm the created backup: $backup_id" >&2
   exit 1
 fi
-printf '%s\n' "$details"
+
+created_at=$($date_bin -u +%Y-%m-%dT%H:%M:%SZ)
+manifest=$(
+  "$jq_bin" --compact-output --null-input \
+    --arg format durable-clickhouse-sink/recovery-point-v1 \
+    --arg created_at "$created_at" \
+    --arg backup_id "$backup_id" \
+    --arg backup_name "$destination" \
+    --argjson connectors "$offset_snapshots" \
+    '{format: $format, created_at: $created_at, backup: {id: $backup_id, name: $backup_name}, connectors: $connectors}'
+)
+producer_config=()
+if [[ -n $kafka_config ]]; then
+  producer_config=(--producer.config "$kafka_config")
+fi
+printf '%s\t%s\n' "$backup_id" "$manifest" |
+  "$kafka_producer_bin" \
+    --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS" \
+    --topic "$KAFKA_RECOVERY_TOPIC" \
+    --property parse.key=true \
+    --property $'key.separator=\t' \
+    --command-property acks=all \
+    --command-property enable.idempotence=true \
+    "${producer_config[@]}"
+
+"$jq_bin" --compact-output --argjson recovery_point "$manifest" \
+  '. + {recovery_point: $recovery_point}' <<<"$details"

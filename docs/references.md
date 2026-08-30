@@ -8,6 +8,7 @@ not only this repository's summaries.
 - [Apache Kafka Streams core concepts: exactly-once state, offsets, and output](https://kafka.apache.org/33/streams/core-concepts/)
 - [Apache Kafka 4.2 Streams configuration](https://kafka.apache.org/42/streams/developer-guide/config-streams/)
 - [Kafka Connect user guide and REST API](https://kafka.apache.org/42/kafka-connect/)
+- [Kafka Connect offset-management API (KIP-875)](https://cwiki.apache.org/confluence/display/KAFKA/KIP-875%3A+First-class+Offsets+Support+in+Kafka+Connect)
 - [ClickHouse Kafka Connect sink documentation](https://clickhouse.com/docs/integrations/connectors/data-ingestion/kafka/kafka-clickhouse-connect-sink)
 - [ClickHouse Kafka Connect exactly-once design](https://github.com/ClickHouse/clickhouse-kafka-connect/blob/main/docs/DESIGN.md)
 - [ClickHouse guidance on deduplication and ReplacingMergeTree visibility](https://clickhouse.com/blog/common-getting-started-issues-with-clickhouse)

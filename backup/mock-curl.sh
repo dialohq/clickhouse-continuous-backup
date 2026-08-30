@@ -52,10 +52,44 @@ if [[ $url =~ /connectors/([^/]+)/status$ ]]; then
       printf '%s\n' '{"connector":{"state":"RUNNING"},"tasks":[{"state":"RUNNING"}]}'
       ;;
     *)
-      if [[ -e $MOCK_STATE/$connector.paused ]]; then
+      if [[ -e $MOCK_STATE/$connector.stopped ]]; then
+        if [[ $SCENARIO == restore-stop-timeout ]]; then
+          printf '%s\n' '{"connector":{"state":"STOPPED"},"tasks":[{"state":"RUNNING"}]}'
+        else
+          printf '%s\n' '{"connector":{"state":"STOPPED"},"tasks":[]}'
+        fi
+      elif [[ -e $MOCK_STATE/$connector.paused ]]; then
         printf '%s\n' '{"connector":{"state":"PAUSED"},"tasks":[{"state":"PAUSED"}]}'
       else
         printf '%s\n' '{"connector":{"state":"RUNNING"},"tasks":[{"state":"RUNNING"}]}'
+      fi
+      ;;
+  esac
+  exit
+fi
+
+if [[ $url =~ /connectors/([^/]+)/offsets$ ]]; then
+  connector=${BASH_REMATCH[1]}
+  if [[ $method == PATCH ]]; then
+    [[ $SCENARIO != restore-patch-failure ]] || exit 22
+    printf '%s' "$data" >"$MOCK_STATE/$connector.offsets"
+    printf '%s\n' '{"message":"The offsets for this connector have been altered successfully"}'
+    exit
+  fi
+  case $SCENARIO in
+    offsets-failure) exit 22 ;;
+    malformed-offsets) printf '%s\n' '{"offsets":"wrong"}'; exit ;;
+    empty-offsets) printf '%s\n' '{"offsets":[]}'; exit ;;
+    restore-wrong-verification)
+      printf '%s\n' '{"offsets":[{"partition":{"kafka_topic":"events.canonical","kafka_partition":0},"offset":{"kafka_offset":999}}]}'
+      ;;
+    *)
+      if [[ -e $MOCK_STATE/$connector.offsets ]]; then
+        printf '%s\n' "$(<"$MOCK_STATE/$connector.offsets")"
+      elif [[ $connector == two ]]; then
+        printf '%s\n' '{"offsets":[{"partition":{"kafka_topic":"calls.canonical","kafka_partition":1},"offset":{"kafka_offset":24}}]}'
+      else
+        printf '%s\n' '{"offsets":[{"partition":{"kafka_topic":"events.canonical","kafka_partition":0},"offset":{"kafka_offset":42}}]}'
       fi
       ;;
   esac

@@ -91,10 +91,12 @@ backup:
 ```
 
 Each run is a Kubernetes Job with `concurrencyPolicy: Forbid`. It verifies all
-managed connector tasks are running, pauses them, creates and verifies a direct
-S3 backup, and resumes them on success, failure, or normal pod termination.
-See the recovery documentation for the independent Kafka backup requirement
-and the unavoidable hard-kill recovery procedure.
+managed connector tasks are running, pauses and drains them, snapshots their
+committed offsets through the Kafka Connect API, creates and verifies a direct
+S3 backup, and publishes a recovery-point manifest to a compacted Kafka topic.
+It resumes the connectors on success, failure, or normal pod termination. The
+manifest is also printed in the successful Job's JSON output. See the recovery
+documentation for replay and the unavoidable hard-kill recovery procedure.
 
 The immutable `stateNamespace`, release name, pipeline name, topic names, and
 Kafka Connect internal topics are recovery identities. Do not rename them as a

@@ -88,6 +88,7 @@ let
         pathPrefix: durable-clickhouse-sink
         archiveExtension: tar.zst
         pauseTimeoutSeconds: 120
+        recoveryTopic: ""
         credentialsSecret:
           name: ""
           httpConfigKey: clickhouse-curl.config
@@ -180,6 +181,7 @@ let
             pathPrefix = {type = "string"; pattern = "^[A-Za-z0-9_./-]+$";};
             archiveExtension = {type = "string"; enum = ["tar.zst" "tar.gz" "tar.xz" "tar.bz2" "tgz" "tzst"];};
             pauseTimeoutSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
+            recoveryTopic = {type = "string";};
             credentialsSecret = {
               type = "object";
               properties = {
@@ -248,6 +250,10 @@ let
       DATABASE {{ $database }}
       {{- $first = false -}}
       {{- end -}}
+      {{- end }}
+
+      {{- define "durable-clickhouse-sink.recoveryTopic" -}}
+      {{- default (printf "%s.recovery-points" (include "durable-clickhouse-sink.fullname" .)) .Values.backup.recoveryTopic -}}
       {{- end }}
     '';
 
@@ -638,6 +644,54 @@ let
       ---
       {{- end }}
       {{- end }}
+      {{- if and .Values.backup.enabled .Values.topics.manage }}
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery-topic
+        labels:
+          {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+          app.kubernetes.io/component: topic-manager
+        annotations:
+          helm.sh/hook: pre-install,pre-upgrade
+          helm.sh/hook-weight: "-5"
+          helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+      spec:
+        backoffLimit: 6
+        template:
+          metadata:
+            labels:
+              {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
+              app.kubernetes.io/component: topic-manager
+          spec:
+            restartPolicy: OnFailure
+            automountServiceAccountToken: false
+            securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+            containers:
+              - name: topic
+                image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+                imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+                command: ["/bin/bash", "-euc"]
+                args:
+                  - |
+                    config=()
+                    if [[ -f /etc/kafka/client.properties ]]; then config=(--command-config /etc/kafka/client.properties); fi
+                    /bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --create --if-not-exists --topic "$RECOVERY_TOPIC" --partitions 1 --replication-factor "$REPLICATION_FACTOR"
+                    /bin/kafka-configs.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "''${config[@]}" --entity-type topics --entity-name "$RECOVERY_TOPIC" --alter --add-config cleanup.policy=compact,retention.ms=-1,retention.bytes=-1
+                env:
+                  - {name: BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
+                  - {name: RECOVERY_TOPIC, value: {{ include "durable-clickhouse-sink.recoveryTopic" . | quote }}}
+                  - {name: REPLICATION_FACTOR, value: {{ .Values.kafka.replicationFactor | quote }}}
+                volumeMounts:
+                  - {name: tmp, mountPath: /tmp}
+                  {{- if .Values.kafka.existingSecret }}
+                  - {name: kafka-client, mountPath: /etc/kafka, readOnly: true}
+                  {{- end }}
+            volumes:
+              - {name: tmp, emptyDir: {}}
+              {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 6 }}
+      ---
+      {{- end }}
     '';
 
     "templates/connectors.yaml" = ''
@@ -802,6 +856,11 @@ let
                       - {name: BACKUP_PATH_PREFIX, value: {{ trimSuffix "/" .Values.backup.pathPrefix | quote }}}
                       - {name: BACKUP_ARCHIVE_EXTENSION, value: {{ .Values.backup.archiveExtension | quote }}}
                       - {name: PAUSE_TIMEOUT_SECONDS, value: {{ .Values.backup.pauseTimeoutSeconds | quote }}}
+                      - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
+                      - {name: KAFKA_RECOVERY_TOPIC, value: {{ include "durable-clickhouse-sink.recoveryTopic" . | quote }}}
+                      {{- if .Values.kafka.existingSecret }}
+                      - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka/client.properties}
+                      {{- end }}
                       - name: BACKUP_RUN_ID
                         valueFrom:
                           fieldRef:
@@ -809,6 +868,9 @@ let
                     volumeMounts:
                       - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
                       - {name: tmp, mountPath: /tmp}
+                      {{- if .Values.kafka.existingSecret }}
+                      - {name: kafka-client, mountPath: /etc/kafka, readOnly: true}
+                      {{- end }}
                 volumes:
                   - name: clickhouse-credentials
                     secret:
@@ -817,6 +879,7 @@ let
                         - key: {{ .Values.backup.credentialsSecret.httpConfigKey }}
                           path: curl.config
                   - {name: tmp, emptyDir: {}}
+                  {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 18 }}
       {{- end }}
     '';
 

@@ -54,6 +54,16 @@ cleanup() {
   if [[ $started_rke2 == true ]]; then
     systemctl stop "$service_name" >/dev/null 2>&1 || true
     systemctl reset-failed "$service_name" >/dev/null 2>&1 || true
+    mapfile -t leftover_pids < <(pgrep -f "$rke2_data" || true)
+    if ((${#leftover_pids[@]} > 0)); then
+      kill -TERM "${leftover_pids[@]}" 2>/dev/null || true
+      for _ in {1..50}; do
+        mapfile -t leftover_pids < <(pgrep -f "$rke2_data" || true)
+        ((${#leftover_pids[@]} == 0)) && break
+        sleep 0.1
+      done
+      ((${#leftover_pids[@]} == 0)) || kill -KILL "${leftover_pids[@]}" 2>/dev/null || true
+    fi
     if [[ $rke2_data == /var/lib/rancher/rke2-durable-clickhouse-sink-e2e ]]; then
       rm -rf -- "$rke2_data"
     fi
@@ -224,11 +234,44 @@ wait_connector_state RUNNING
 
 k -n "$namespace" create job e2e-backup --from=cronjob/sink-durable-clickhouse-sink-backup
 k -n "$namespace" wait job/e2e-backup --for=condition=Complete --timeout=900s
-backup=$(k -n "$namespace" logs job/e2e-backup | jq -r 'select(.status == "BACKUP_CREATED") | .name')
+backup_output=$(k -n "$namespace" logs job/e2e-backup | jq --raw-input --compact-output 'fromjson? | select(.status == "BACKUP_CREATED")')
+backup=$(jq -r '.name' <<<"$backup_output")
+backup_id=$(jq -r '.recovery_point.backup.id' <<<"$backup_output")
+manifest=$(jq --compact-output '.recovery_point' <<<"$backup_output")
 [[ $backup == S3\(* ]]
+[[ $backup_id =~ ^[[:xdigit:]-]{36}$ ]]
+kafka_manifest=$(k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
+  /bin/kafka-console-consumer.sh \
+    --bootstrap-server redpanda:9092 \
+    --topic sink-durable-clickhouse-sink.recovery-points \
+    --from-beginning \
+    --max-messages 1 \
+    --timeout-ms 10000 |
+  jq --raw-input --compact-output 'fromjson? | select(.format == "durable-clickhouse-sink/recovery-point-v1")')
+if ! jq --exit-status --argjson expected "$manifest" '. == $expected' <<<"$kafka_manifest" >/dev/null; then
+  echo "recovery-point topic did not return the Job manifest" >&2
+  printf 'expected: %s\nactual: %s\n' "$manifest" "$kafka_manifest" >&2
+  exit 1
+fi
+
+start_producer pre-restore-tail 1101 1200 2
+k -n "$namespace" wait pod/pre-restore-tail --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+wait_count 1200 'SELECT count() FROM durable_e2e.events'
+wait_count 1200 'SELECT uniqExact(id) FROM durable_e2e.events'
+
 restore_clickhouse "RESTORE DATABASE durable_e2e AS durable_restore FROM $backup"
 [[ $(restore_clickhouse 'SELECT count() FROM durable_restore.events') == 1100 ]]
 [[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_restore.events') == 1100 ]]
+
+connector_request PUT /stop
+wait_connector_state STOPPED
+printf '%s\n' "$manifest" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
+  env \
+    CONNECT_URL=http://localhost:8083 \
+    CONNECTOR_NAMES=sink-durable-clickhouse-sink-events \
+    EXPECTED_BACKUP_NAME="$backup" \
+    RECOVERY_MANIFEST_FILE=- \
+    /bin/durable-clickhouse-restore-offsets >/dev/null
 
 helm --kubeconfig "$kubeconfig" upgrade sink "$chart" \
   --namespace "$namespace" --values "$values" \
@@ -237,15 +280,18 @@ helm --kubeconfig "$kubeconfig" upgrade sink "$chart" \
   --set backup.enabled=false \
   --wait --timeout 10m
 
-start_producer post-restore-events 1101 1200 2
+connector_request PUT /resume
+wait_connector_state RUNNING
+
+start_producer post-restore-events 1201 1300 2
 k -n "$namespace" wait pod/post-restore-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 for _ in {1..240}; do
   restored=$(restore_clickhouse 'SELECT count() FROM durable_restore.events' 2>/dev/null || true)
-  [[ $restored == 1200 ]] && break
+  [[ $restored == 1300 ]] && break
   sleep 1
 done
-[[ $restored == 1200 ]]
-[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_restore.events') == 1200 ]]
-[[ $(clickhouse 'SELECT count() FROM durable_e2e.events') == 1100 ]]
+[[ $restored == 1300 ]]
+[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_restore.events') == 1300 ]]
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.events') == 1200 ]]
 
-echo "RKE2 E2E passed: crash recovery, bounded deduplication, conflict quarantine, ClickHouse exactly-once delivery, portable backup, restore, and offset-preserving cutover"
+echo "RKE2 E2E passed: crash recovery, bounded deduplication, conflict quarantine, ClickHouse exactly-once delivery, portable recovery point, offset rewind, tail replay, and restore cutover"

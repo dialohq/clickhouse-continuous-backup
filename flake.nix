@@ -151,6 +151,9 @@
         grep -F '/bin/durable-clickhouse-backup' rendered.yaml >/dev/null
         grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
         grep -F 'BACKUP_NAMED_COLLECTION' rendered.yaml >/dev/null
+        grep -F 'KAFKA_RECOVERY_TOPIC' rendered.yaml >/dev/null
+        grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
+        grep -F '.recovery-points' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
         touch $out
       '';

@@ -48,7 +48,7 @@ The target can therefore remain a normal append-only MergeTree-family table.
 | Connect dies before ClickHouse acknowledgement | canonical topic and KeeperMap | deterministic block retry |
 | Connect dies after insert but before Kafka offset commit | KeeperMap and ClickHouse block hash | inserted block is not duplicated |
 | local deduplicator volume is lost | Streams changelog | state is restored before readiness |
-| ClickHouse data loss | S3 backup plus preserved Kafka state | offset-preserving cutover |
+| ClickHouse data loss | S3 backup, recovery manifest, and retained canonical log | rewind and deterministic tail replay |
 
 ## Producer boundary
 

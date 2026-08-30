@@ -17,9 +17,15 @@ The backup suite exercises:
 - pause request failure and pause timeout;
 - ClickHouse request failure and malformed backup responses;
 - missing or mismatched `system.backups` confirmation;
+- unavailable, empty, or malformed Kafka Connect offset snapshots;
+- failure to publish the recovery manifest after a verified archive;
 - connector resumption after every post-preflight failure and `SIGTERM`;
-- a successful multi-connector backup with a unique destination and an exact
-  backup-ID verification query.
+- a successful multi-connector backup with a unique destination, exact backup
+  verification, and exact per-partition offsets in the Kafka record;
+- restore rejection for malformed manifests, wrong archives, connector-set
+  mismatches, running or incompletely stopped connectors, offset API failure,
+  and read-back mismatch;
+- successful idempotent application of a multi-connector offset snapshot.
 
 ## RKE2 end to end
 
@@ -50,9 +56,11 @@ restore ClickHouse/Keeper instances, and MinIO. It then verifies:
    connector paused or creating a backup;
 7. a direct-S3 backup is visible to an independent ClickHouse server;
 8. the database and KeeperMap checkpoint restore successfully;
-9. preserving the Kafka Connect identity during cutover delivers later records
-   exactly once to the restored target;
-10. the former target stops advancing after cutover.
+9. the compacted recovery record contains the backup's exact connector offsets;
+10. records written after the backup first reach the original target;
+11. Connect is stopped and rewound to the recorded offsets through its standard
+    API, then the restored target receives that tail exactly once;
+12. the former target stops advancing after cutover.
 
 MinIO is test-only. Production uses an externally managed S3-compatible store,
 such as Ceph RGW, through the same ClickHouse named-collection interface.

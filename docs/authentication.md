@@ -20,8 +20,9 @@ ssl.truststore.location=/path/provided-by-a-custom-image
 The Kafka principal needs read access to raw and canonical topics; write access
 to canonical and conflict topics; transactional-ID access for each Streams
 application; and access to the Streams changelog, repartition, Connect internal,
-and consumer-offset resources it owns. Topic-management privileges are needed
-only when `topics.manage=true`.
+consumer-offset, and recovery-point resources it owns. The backup Job needs
+write access to the recovery-point topic; recovery tooling needs read access.
+Topic-management privileges are needed only when `topics.manage=true`.
 
 ## ClickHouse writer
 

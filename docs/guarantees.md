@@ -52,5 +52,5 @@ Required retention relationships are:
 
 ```text
 maximum producer retry age < raw topic retention < deduplication retention
-maximum ClickHouse recovery point age < canonical topic retention
+maximum ClickHouse recovery point age < canonical topic and recovery-manifest retention
 ```
