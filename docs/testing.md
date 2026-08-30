@@ -20,6 +20,9 @@ The Rust backup suite exercises:
   overflow, and wrong-topic states, plus zero for never-ingested partitions;
 - manifest tampering across backup shape, connector identity, topic, partition,
   observed offsets, exact offsets, and checkpoint identity;
+- exhaustive lag/equality/ahead boundaries across representative offsets,
+  independent unordered partitions, self-referential chains, and generation
+  overflow;
 - MergeTree-family acceptance and refusal of append-only engines or a missing
   KeeperMap table when incrementals are enabled.
 
@@ -57,7 +60,10 @@ restore ClickHouse/Keeper instances, and MinIO. It then verifies:
 9. the compacted recovery record contains exact KeeperMap-derived offsets and
    the chain dependencies;
 10. the recovery utility refuses to patch until restored KeeperMap equals the
-    manifest, patches Connect while stopped, and verifies exact read-back;
+    manifest; rejects offset `-1`/`+1`, duplicate partitions, a self-consistent
+    but unrestored Keeper state, the wrong event backup, and a running
+    connector without changing Connect offsets; then patches while stopped and
+    verifies exact read-back;
 11. records written after the recovery point first reach the original target,
     then replay exactly once into the restored target after cutover;
 12. the former target stops advancing after cutover.

@@ -316,28 +316,59 @@ restore_clickhouse "RESTORE TABLE durable_e2e.events FROM $backup"
 connector_request PUT /stop
 wait_connector_state STOPPED
 apply_recovery() {
-  printf '%s\n' "$manifest" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
+  local recovery_manifest=$1 expected_backup=$2
+  printf '%s\n' "$recovery_manifest" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
     env \
       CONNECT_URL=http://localhost:8083 \
       CLICKHOUSE_URL=http://clickhouse-restore:8123/ \
       CLICKHOUSE_USERNAME=default \
       CLICKHOUSE_PASSWORD= \
       CONNECTOR_NAMES=sink-durable-clickhouse-sink-events \
-      EXPECTED_BACKUP_NAME="$backup" \
+      EXPECTED_BACKUP_NAME="$expected_backup" \
       RECOVERY_MANIFEST_FILE=- \
       STOP_TIMEOUT_SECONDS=120 \
       /bin/durable-clickhouse-recovery restore-offsets
 }
 
-offsets_before=$(connector_request GET /offsets | jq --sort-keys --compact-output .)
-if apply_recovery >/dev/null 2>&1; then
-  echo 'recovery accepted a missing KeeperMap checkpoint' >&2
-  exit 1
-fi
-[[ $(connector_request GET /offsets | jq --sort-keys --compact-output .) == "$offsets_before" ]]
+assert_recovery_rejected() {
+  local pathology=$1 recovery_manifest=$2 expected_backup=$3 offsets_before offsets_after
+  offsets_before=$(connector_request GET /offsets | jq --sort-keys --compact-output .)
+  if apply_recovery "$recovery_manifest" "$expected_backup" >/dev/null 2>&1; then
+    echo "recovery accepted pathology: $pathology" >&2
+    exit 1
+  fi
+  offsets_after=$(connector_request GET /offsets | jq --sort-keys --compact-output .)
+  if [[ $offsets_after != "$offsets_before" ]]; then
+    echo "rejected recovery changed Connect offsets: $pathology" >&2
+    exit 1
+  fi
+}
+
+assert_recovery_rejected missing-keeper-checkpoint "$manifest" "$backup"
 
 restore_clickhouse "RESTORE TABLE durable_e2e.durable_sink_e2e_events_state FROM $checkpoint_backup"
-apply_recovery >/dev/null
+
+offset_plus_one=$(jq --compact-output '(.connectors[0].offsets[0].offset.kafka_offset) += 1' <<<"$manifest")
+offset_minus_one=$(jq --compact-output '(.connectors[0].offsets[0].offset.kafka_offset) -= 1' <<<"$manifest")
+duplicate_offset=$(jq --compact-output '.connectors[0].offsets += [.connectors[0].offsets[0]]' <<<"$manifest")
+keeper_ahead=$(jq --compact-output '
+  (.connectors[0].keeper.rows[0].key | split("-") | last | tonumber) as $partition |
+  (.connectors[0].keeper.rows[0].maxOffset) += 1 |
+  (.connectors[0].offsets[] | select(.partition.kafka_partition == $partition).offset.kafka_offset) += 1
+' <<<"$manifest")
+assert_recovery_rejected exact-offset-plus-one "$offset_plus_one" "$backup"
+assert_recovery_rejected exact-offset-minus-one "$offset_minus_one" "$backup"
+assert_recovery_rejected duplicate-topic-partition "$duplicate_offset" "$backup"
+assert_recovery_rejected restored-keeper-mismatch "$keeper_ahead" "$backup"
+assert_recovery_rejected wrong-event-backup "$manifest" "$base"
+
+connector_request PUT /resume
+wait_connector_state RUNNING
+assert_recovery_rejected connector-running "$manifest" "$backup"
+connector_request PUT /stop
+wait_connector_state STOPPED
+
+apply_recovery "$manifest" "$backup" >/dev/null
 
 helm --kubeconfig "$kubeconfig" upgrade sink "$chart" \
   --namespace "$namespace" --values "$values" \
@@ -360,4 +391,4 @@ done
 [[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_e2e.events') == 1300 ]]
 [[ $(clickhouse 'SELECT count() FROM durable_e2e.events') == 1250 ]]
 
-echo "RKE2 E2E passed: crash recovery, bounded deduplication, conflict quarantine, exact KeeperMap offsets, full/incremental rollover, independent KeeperMap checkpoint, tail replay, and restore cutover"
+echo "RKE2 E2E passed: crash recovery, bounded deduplication, conflict quarantine, exact KeeperMap offsets, full/incremental rollover, adversarial recovery rejection, tail replay, and restore cutover"

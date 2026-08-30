@@ -319,10 +319,14 @@ fn validate_head(head: Option<&ChainHead>) -> Result<()> {
             && head.latest.base.is_none()
             && head.latest == head.base
     } else {
-        head.latest.kind == BackupKind::Incremental && head.latest.base.is_some()
+        head.latest.kind == BackupKind::Incremental
+            && head.latest.base.as_ref().is_some_and(|dependency| {
+                dependency.id != head.latest.id && dependency.name != head.latest.name
+            })
     };
     if head.format != CHAIN_HEAD_FORMAT
         || head.generation == 0
+        || head.generation == u64::MAX
         || !safe_chain_id(&head.chain_id)
         || head.base.kind != BackupKind::Full
         || !backup_destination(&head.base.name)
@@ -507,7 +511,7 @@ mod tests {
 
     fn reference(kind: BackupKind, position: u32) -> BackupReference {
         BackupReference {
-            id: Uuid::nil(),
+            id: Uuid::from_u128(position as u128 + 1),
             name: format!("S3(backups, 'root/chains/chain/backup-{position}.tar.zst')"),
             kind,
             chain_id: "chain".to_owned(),
@@ -527,7 +531,7 @@ mod tests {
         );
         if incrementals > 0 {
             latest.base = Some(BackupDependency {
-                id: Uuid::nil(),
+                id: Uuid::from_u128(incrementals as u128),
                 name: format!(
                     "S3(backups, 'root/chains/chain/backup-{}.tar.zst')",
                     incrementals - 1
@@ -618,6 +622,47 @@ mod tests {
     }
 
     #[test]
+    fn connect_may_lag_keeper_by_any_amount_but_never_lead() {
+        for max_offset in [0, 1, 2, 31, 1024, u32::MAX as u64] {
+            let exact = max_offset + 1;
+            for observed in [0, 1, exact / 2, exact] {
+                let point = checkpoint(
+                    &pipeline(),
+                    vec![offset(0, observed)],
+                    vec![row(0, max_offset, "AFTER_PROCESSING")],
+                )
+                .unwrap();
+                assert_eq!(point.offsets[0], offset(0, exact));
+            }
+            assert!(
+                checkpoint(
+                    &pipeline(),
+                    vec![offset(0, exact + 1)],
+                    vec![row(0, max_offset, "AFTER_PROCESSING")],
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn partitions_are_derived_independently_from_unordered_state() {
+        let point = checkpoint(
+            &pipeline(),
+            vec![offset(2, 90), offset(0, 10)],
+            vec![
+                row(2, 99, "AFTER_PROCESSING"),
+                row(0, 10, "AFTER_PROCESSING"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            point.offsets,
+            vec![offset(0, 11), offset(1, 0), offset(2, 100)]
+        );
+    }
+
+    #[test]
     fn rejects_connect_ahead_of_clickhouse() {
         let error = checkpoint(
             &pipeline(),
@@ -700,6 +745,15 @@ mod tests {
         invalid = head(2);
         invalid.latest.name = "S3(backups, 'root/../escape.tar.zst')".to_owned();
         assert!(validate_head(Some(&invalid)).is_err());
+        invalid = head(2);
+        invalid.latest.base = Some(BackupDependency {
+            id: invalid.latest.id,
+            name: invalid.latest.name.clone(),
+        });
+        assert!(validate_head(Some(&invalid)).is_err());
+        invalid = head(2);
+        invalid.generation = u64::MAX;
+        assert!(validate_head(Some(&invalid)).is_err());
     }
 
     fn recovery_point() -> RecoveryPoint {
@@ -708,7 +762,7 @@ mod tests {
             created_at: "2026-08-30T12:00:00Z".to_owned(),
             backup: reference(BackupKind::Full, 0),
             checkpoint_backup: BackupDependency {
-                id: Uuid::from_u128(1),
+                id: Uuid::from_u128(999),
                 name: "S3(backups, 'root/chains/chain/checkpoint.tar.zst')".to_owned(),
             },
             connectors: vec![ConnectorCheckpoint {
@@ -736,6 +790,10 @@ mod tests {
         let mut point = recovery_point();
         point.connectors[0].offsets[0].offset.kafka_offset = 9;
         assert!(validate_recovery_point(&point).is_err());
+
+        point = recovery_point();
+        point.connectors[0].offsets[0].offset.kafka_offset = 11;
+        assert!(validate_recovery_point(&point).is_err());
     }
 
     #[test]
@@ -756,6 +814,16 @@ mod tests {
         point = recovery_point();
         let row = point.connectors[0].keeper.rows[0].clone();
         point.connectors[0].keeper.rows.push(row);
+        assert!(validate_recovery_point(&point).is_err());
+
+        point = recovery_point();
+        point.connectors[0].offsets.pop();
+        assert!(validate_recovery_point(&point).is_err());
+
+        point = recovery_point();
+        point.connectors[0]
+            .observed_connect_offsets
+            .push(offset(0, 8));
         assert!(validate_recovery_point(&point).is_err());
     }
 
@@ -802,6 +870,14 @@ mod tests {
 
         point = recovery_point();
         point.checkpoint_backup.name = "S3(backups, 'root/../checkpoint.tar.zst')".to_owned();
+        assert!(validate_recovery_point(&point).is_err());
+
+        point = recovery_point();
+        point.checkpoint_backup.id = point.backup.id;
+        assert!(validate_recovery_point(&point).is_err());
+
+        point = recovery_point();
+        point.connectors[0].keeper.rows[0].key = "events.canonical-1".to_owned();
         assert!(validate_recovery_point(&point).is_err());
     }
 }
