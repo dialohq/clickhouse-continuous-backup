@@ -300,7 +300,7 @@ jq --exit-status --arg id "$incremental_one_id" --arg name "$incremental_one" '
 kafka_manifest=$(k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
   /bin/kafka-console-consumer.sh \
     --bootstrap-server redpanda:9092 \
-    --topic sink-durable-clickhouse-sink.backups \
+    --topic sink-durable-clickhouse-sink.backup-catalog \
     --partition 0 \
     --from-beginning \
     --timeout-ms 10000 2>/dev/null |
