@@ -85,18 +85,26 @@ backup:
   schedule: "17 2 * * *"
   namedCollection: durable_clickhouse_backups
   pathPrefix: durable-events/production
+  maxIncrementalsPerFull: 6
   credentialsSecret:
     name: durable-clickhouse-backup
-    httpConfigKey: clickhouse-curl.config
+    usernameKey: username
+    passwordKey: password
 ```
 
 Each run is a Kubernetes Job with `concurrencyPolicy: Forbid`. It verifies all
 managed connector tasks are running, pauses and drains them, snapshots their
-committed offsets through the Kafka Connect API, creates and verifies a direct
-S3 backup, and publishes a recovery-point manifest to a compacted Kafka topic.
-It resumes the connectors on success, failure, or normal pod termination. The
+ClickHouse KeeperMap state, creates and verifies a direct S3 backup, and
+publishes a recovery-point manifest to a compacted Kafka topic. Event tables use
+one full backup followed by at most `maxIncrementalsPerFull` incremental
+backups. Every point also contains an independent full KeeperMap checkpoint.
+The safe default is `0`, which creates only full backups. Incremental mode
+requires every target table to use a MergeTree-family engine.
+
+The Job resumes connectors on success, failure, or normal pod termination. The
 manifest is also printed in the successful Job's JSON output. See the recovery
-documentation for replay and the unavoidable hard-kill recovery procedure.
+documentation for the exact-offset restore procedure and hard-kill recovery
+boundary.
 
 The immutable `stateNamespace`, release name, pipeline name, topic names, and
 Kafka Connect internal topics are recovery identities. Do not rename them as a

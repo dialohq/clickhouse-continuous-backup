@@ -24,8 +24,9 @@ Each connector uses a stable Keeper path and state table derived from
 durable_sink_<stateNamespace>_<pipeline>_state
 ```
 
-The state table is created in the target database and must be included in its
-backup.
+The state table is created in the target database. Each recovery point stores
+it in an independent full checkpoint; it is never part of the incremental event
+table chain.
 
 ## Why the target is not ReplacingMergeTree
 
@@ -48,7 +49,7 @@ The target can therefore remain a normal append-only MergeTree-family table.
 | Connect dies before ClickHouse acknowledgement | canonical topic and KeeperMap | deterministic block retry |
 | Connect dies after insert but before Kafka offset commit | KeeperMap and ClickHouse block hash | inserted block is not duplicated |
 | local deduplicator volume is lost | Streams changelog | state is restored before readiness |
-| ClickHouse data loss | S3 backup, recovery manifest, and retained canonical log | rewind and deterministic tail replay |
+| ClickHouse data loss | incremental/full event backup, full KeeperMap checkpoint, manifest, and retained canonical log | verified exact-offset tail replay |
 
 ## Producer boundary
 

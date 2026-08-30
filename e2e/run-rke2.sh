@@ -177,6 +177,8 @@ wait_count() {
 
 start_producer() {
   local name=$1 first=$2 last=$3 repeats=$4
+  # The single-quoted program expands inside the producer pod.
+  # shellcheck disable=SC2016
   k -n "$namespace" run "$name" \
     --image=ghcr.io/dialohq/durable-clickhouse-connect:e2e \
     --image-pull-policy=Never \
@@ -226,72 +228,136 @@ wait_connector_state RUNNING
 backups_before=$(clickhouse "SELECT count() FROM system.backups WHERE status = 'BACKUP_CREATED'")
 k -n "$namespace" create job e2e-backup-bad-credentials \
   --from=cronjob/sink-durable-clickhouse-sink-backup --dry-run=client -o json |
-  jq '(.spec.template.spec.volumes[] | select(.name == "clickhouse-credentials").secret.secretName) = "clickhouse-bad-backup"' |
+  jq '(.spec.template.spec.containers[0].env[] | select(.name == "CLICKHOUSE_USERNAME" or .name == "CLICKHOUSE_PASSWORD").valueFrom.secretKeyRef.name) = "clickhouse-bad-backup"' |
   k apply -f -
 k -n "$namespace" wait job/e2e-backup-bad-credentials --for=condition=Failed --timeout=300s
 wait_connector_state RUNNING
 [[ $(clickhouse "SELECT count() FROM system.backups WHERE status = 'BACKUP_CREATED'") == "$backups_before" ]]
 
-k -n "$namespace" create job e2e-backup --from=cronjob/sink-durable-clickhouse-sink-backup
-k -n "$namespace" wait job/e2e-backup --for=condition=Complete --timeout=900s
-backup_output=$(k -n "$namespace" logs job/e2e-backup | jq --raw-input --compact-output 'fromjson? | select(.status == "BACKUP_CREATED")')
-backup=$(jq -r '.name' <<<"$backup_output")
-backup_id=$(jq -r '.recovery_point.backup.id' <<<"$backup_output")
-manifest=$(jq --compact-output '.recovery_point' <<<"$backup_output")
+run_backup() {
+  local job=$1
+  k -n "$namespace" create job "$job" --from=cronjob/sink-durable-clickhouse-sink-backup >&2
+  for _ in {1..900}; do
+    state=$(k -n "$namespace" get "job/$job" -o jsonpath='{range .status.conditions[*]}{.type}:{.status}{"\n"}{end}')
+    [[ $state == *'Complete:True'* ]] && break
+    if [[ $state == *'Failed:True'* ]]; then
+      k -n "$namespace" logs "job/$job" --all-containers --prefix >&2
+      return 1
+    fi
+    sleep 1
+  done
+  [[ $state == *'Complete:True'* ]]
+  k -n "$namespace" logs "job/$job" |
+    jq --raw-input --compact-output 'fromjson? | select(.status == "BACKUP_CREATED")'
+}
+
+base_output=$(run_backup e2e-backup-base)
+base=$(jq -r '.name' <<<"$base_output")
+base_id=$(jq -r '.recovery_point.backup.id' <<<"$base_output")
+base_manifest=$(jq --compact-output '.recovery_point' <<<"$base_output")
+jq --exit-status '.backup.kind == "full" and .backup.position == 0 and (.backup | has("base") | not)' <<<"$base_manifest" >/dev/null
+
+start_producer incremental-one-events 1101 1150 2
+k -n "$namespace" wait pod/incremental-one-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+wait_count 1150 'SELECT count() FROM durable_e2e.events'
+incremental_one_output=$(run_backup e2e-backup-incremental-one)
+incremental_one=$(jq -r '.name' <<<"$incremental_one_output")
+incremental_one_id=$(jq -r '.recovery_point.backup.id' <<<"$incremental_one_output")
+jq --exit-status --arg id "$base_id" --arg name "$base" '
+  .recovery_point.backup.kind == "incremental" and
+  .recovery_point.backup.position == 1 and
+  .recovery_point.backup.base == {id: $id, name: $name}
+' <<<"$incremental_one_output" >/dev/null
+
+start_producer incremental-two-events 1151 1200 2
+k -n "$namespace" wait pod/incremental-two-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
+wait_count 1200 'SELECT count() FROM durable_e2e.events'
+incremental_two_output=$(run_backup e2e-backup-incremental-two)
+backup=$(jq -r '.name' <<<"$incremental_two_output")
+checkpoint_backup=$(jq -r '.recovery_point.checkpoint_backup.name' <<<"$incremental_two_output")
+backup_id=$(jq -r '.recovery_point.backup.id' <<<"$incremental_two_output")
+manifest=$(jq --compact-output '.recovery_point' <<<"$incremental_two_output")
+jq --exit-status --arg id "$incremental_one_id" --arg name "$incremental_one" '
+  .backup.kind == "incremental" and
+  .backup.position == 2 and
+  .backup.base == {id: $id, name: $name} and
+  ([.connectors[].keeper.rows[].state] | all(. == "AFTER_PROCESSING")) and
+  ([.connectors[] | .offsets as $exact | .observed_connect_offsets[] |
+    . as $observed | ($exact[] | select(.partition == $observed.partition) | .offset.kafka_offset) >= $observed.offset.kafka_offset] | all)
+' <<<"$manifest" >/dev/null
 [[ $backup == S3\(* ]]
 [[ $backup_id =~ ^[[:xdigit:]-]{36}$ ]]
+
 kafka_manifest=$(k -n "$namespace" exec deployment/sink-durable-clickhouse-sink-connect -- \
   /bin/kafka-console-consumer.sh \
     --bootstrap-server redpanda:9092 \
     --topic sink-durable-clickhouse-sink.recovery-points \
+    --partition 0 \
     --from-beginning \
-    --max-messages 1 \
-    --timeout-ms 10000 |
-  jq --raw-input --compact-output 'fromjson? | select(.format == "durable-clickhouse-sink/recovery-point-v1")')
+    --timeout-ms 10000 2>/dev/null |
+  jq --raw-input --compact-output --arg id "$backup_id" 'fromjson? | select(.backup.id == $id)' | tail -1)
 if ! jq --exit-status --argjson expected "$manifest" '. == $expected' <<<"$kafka_manifest" >/dev/null; then
   echo "recovery-point topic did not return the Job manifest" >&2
   printf 'expected: %s\nactual: %s\n' "$manifest" "$kafka_manifest" >&2
   exit 1
 fi
 
-start_producer pre-restore-tail 1101 1200 2
+start_producer pre-restore-tail 1201 1250 2
 k -n "$namespace" wait pod/pre-restore-tail --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
-wait_count 1200 'SELECT count() FROM durable_e2e.events'
-wait_count 1200 'SELECT uniqExact(id) FROM durable_e2e.events'
+wait_count 1250 'SELECT count() FROM durable_e2e.events'
+rollover_output=$(run_backup e2e-backup-rollover)
+jq --exit-status '.recovery_point.backup.kind == "full" and .recovery_point.backup.position == 0' <<<"$rollover_output" >/dev/null
 
-restore_clickhouse "RESTORE DATABASE durable_e2e AS durable_restore FROM $backup"
-[[ $(restore_clickhouse 'SELECT count() FROM durable_restore.events') == 1100 ]]
-[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_restore.events') == 1100 ]]
+restore_clickhouse 'CREATE DATABASE durable_e2e'
+restore_clickhouse "RESTORE TABLE durable_e2e.events FROM $backup"
+[[ $(restore_clickhouse 'SELECT count() FROM durable_e2e.events') == 1200 ]]
+[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_e2e.events') == 1200 ]]
 
 connector_request PUT /stop
 wait_connector_state STOPPED
-printf '%s\n' "$manifest" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
-  env \
-    CONNECT_URL=http://localhost:8083 \
-    CONNECTOR_NAMES=sink-durable-clickhouse-sink-events \
-    EXPECTED_BACKUP_NAME="$backup" \
-    RECOVERY_MANIFEST_FILE=- \
-    /bin/durable-clickhouse-restore-offsets >/dev/null
+apply_recovery() {
+  printf '%s\n' "$manifest" | k -n "$namespace" exec -i deployment/sink-durable-clickhouse-sink-connect -- \
+    env \
+      CONNECT_URL=http://localhost:8083 \
+      CLICKHOUSE_URL=http://clickhouse-restore:8123/ \
+      CLICKHOUSE_USERNAME=default \
+      CLICKHOUSE_PASSWORD= \
+      CONNECTOR_NAMES=sink-durable-clickhouse-sink-events \
+      EXPECTED_BACKUP_NAME="$backup" \
+      RECOVERY_MANIFEST_FILE=- \
+      STOP_TIMEOUT_SECONDS=120 \
+      /bin/durable-clickhouse-recovery restore-offsets
+}
+
+offsets_before=$(connector_request GET /offsets | jq --sort-keys --compact-output .)
+if apply_recovery >/dev/null 2>&1; then
+  echo 'recovery accepted a missing KeeperMap checkpoint' >&2
+  exit 1
+fi
+[[ $(connector_request GET /offsets | jq --sort-keys --compact-output .) == "$offsets_before" ]]
+
+restore_clickhouse "RESTORE TABLE durable_e2e.durable_sink_e2e_events_state FROM $checkpoint_backup"
+apply_recovery >/dev/null
 
 helm --kubeconfig "$kubeconfig" upgrade sink "$chart" \
   --namespace "$namespace" --values "$values" \
   --set-string clickhouse.host=clickhouse-restore.durable-sink-e2e.svc.cluster.local \
-  --set-string clickhouse.database=durable_restore \
+  --set-string clickhouse.database=durable_e2e \
   --set backup.enabled=false \
   --wait --timeout 10m
 
 connector_request PUT /resume
 wait_connector_state RUNNING
 
-start_producer post-restore-events 1201 1300 2
+start_producer post-restore-events 1251 1300 2
 k -n "$namespace" wait pod/post-restore-events --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 for _ in {1..240}; do
-  restored=$(restore_clickhouse 'SELECT count() FROM durable_restore.events' 2>/dev/null || true)
+  restored=$(restore_clickhouse 'SELECT count() FROM durable_e2e.events' 2>/dev/null || true)
   [[ $restored == 1300 ]] && break
   sleep 1
 done
 [[ $restored == 1300 ]]
-[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_restore.events') == 1300 ]]
-[[ $(clickhouse 'SELECT count() FROM durable_e2e.events') == 1200 ]]
+[[ $(restore_clickhouse 'SELECT uniqExact(id) FROM durable_e2e.events') == 1300 ]]
+[[ $(clickhouse 'SELECT count() FROM durable_e2e.events') == 1250 ]]
 
-echo "RKE2 E2E passed: crash recovery, bounded deduplication, conflict quarantine, ClickHouse exactly-once delivery, portable recovery point, offset rewind, tail replay, and restore cutover"
+echo "RKE2 E2E passed: crash recovery, bounded deduplication, conflict quarantine, exact KeeperMap offsets, full/incremental rollover, independent KeeperMap checkpoint, tail replay, and restore cutover"

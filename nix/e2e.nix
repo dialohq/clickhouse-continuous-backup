@@ -23,13 +23,13 @@ in {
           username=default
           password=
         '';
-        "clickhouse-curl.config" = ''
-          user = "default:"
-        '';
+        username = "default";
+        password = "";
       };
-      secrets.clickhouse-bad-backup.stringData."clickhouse-curl.config" = ''
-        user = "missing:wrong"
-      '';
+      secrets.clickhouse-bad-backup.stringData = {
+        username = "missing";
+        password = "wrong";
+      };
 
       services = {
         redpanda.spec = {

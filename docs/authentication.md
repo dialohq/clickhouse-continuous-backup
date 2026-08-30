@@ -7,8 +7,8 @@ an operator-specific secret controller.
 ## Kafka
 
 `kafka.existingSecret` contains a Java properties file under
-`kafka.propertiesKey`. The same file is used by Kafka Streams, Kafka Connect,
-and topic-management jobs. It can contain TLS, SASL/SCRAM, or OAuth properties.
+`kafka.propertiesKey`. Kafka Streams, Kafka Connect, and topic-management jobs
+use that file. It can contain TLS, SASL/SCRAM, or OAuth properties.
 
 ```properties
 security.protocol=SASL_SSL
@@ -17,11 +17,26 @@ sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule require
 ssl.truststore.location=/path/provided-by-a-custom-image
 ```
 
+When backups are enabled, the same Secret must also contain a librdkafka-format
+file under `backup.kafkaPropertiesKey` (`librdkafka.properties` by default).
+Keeping separate keys avoids lossy translation of Java JAAS, truststore, and
+OAuth settings. For SASL/SCRAM it commonly contains:
+
+```properties
+security.protocol=SASL_SSL
+sasl.mechanism=SCRAM-SHA-512
+sasl.username=durable-sink
+sasl.password=...
+ssl.ca.location=/etc/ssl/certs/ca-bundle.crt
+```
+
 The Kafka principal needs read access to raw and canonical topics; write access
 to canonical and conflict topics; transactional-ID access for each Streams
 application; and access to the Streams changelog, repartition, Connect internal,
 consumer-offset, and recovery-point resources it owns. The backup Job needs
-write access to the recovery-point topic; recovery tooling needs read access.
+read/write access to the recovery-point topic, transactional-ID access for its
+manifest transaction, and consumer-group access to the topic-derived
+`<recovery-topic>.backup-lock` group. Recovery tooling needs read access.
 Topic-management privileges are needed only when `topics.manage=true`.
 
 ## ClickHouse writer
@@ -40,15 +55,20 @@ version and validate them in a non-production database.
 
 ## Backup user and object storage
 
-Backups use a separate `backup.credentialsSecret`. Its curl config is mounted
-only into the CronJob:
+Backups use a separate `backup.credentialsSecret`. Its `usernameKey` and
+`passwordKey` are exposed only to each CronJob pod:
 
-```text
-user = "durable_backup:..."
+```yaml
+stringData:
+  username: durable_backup
+  password: ...
 ```
 
-The backup identity needs the ClickHouse `BACKUP` and object-read permissions
-for the configured databases. It should not be the ingestion writer.
+The backup identity needs `SELECT` on the target and KeeperMap tables, access to
+`system.backups` and `system.tables`, and ClickHouse's `BACKUP` permission for
+the selected objects. The recovery identity additionally needs the restored
+KeeperMap `SELECT` required before offsets can be patched. Neither identity
+should be the ingestion writer.
 
 RGW/S3 credentials are not passed through Helm. Configure
 `backup.namedCollection` on every source and restore ClickHouse server. The
@@ -58,7 +78,9 @@ ClickHouse deployment.
 
 ## Rotation boundary
 
-A projected Secret can update a file, but a running ClickHouse connector does
+A new CronJob pod reads current Kafka and ClickHouse Secret values, so rotating
+backup credentials does not require changing the chart. A projected Secret can
+update a file, but a running ClickHouse connector does
 not reconstruct its client merely because the file changed. Credential rotation
 must trigger a controlled Connect task restart before the old lease expires.
 `connect.podAnnotations` and `deduplicator.podAnnotations` are available for a

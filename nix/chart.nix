@@ -87,11 +87,14 @@ let
         namedCollection: durable_clickhouse_backups
         pathPrefix: durable-clickhouse-sink
         archiveExtension: tar.zst
+        maxIncrementalsPerFull: 0
         pauseTimeoutSeconds: 120
         recoveryTopic: ""
+        kafkaPropertiesKey: librdkafka.properties
         credentialsSecret:
           name: ""
-          httpConfigKey: clickhouse-curl.config
+          usernameKey: username
+          passwordKey: password
         successfulJobsHistoryLimit: 3
         failedJobsHistoryLimit: 3
 
@@ -180,13 +183,16 @@ let
             namedCollection = {type = "string"; pattern = "^[A-Za-z_][A-Za-z0-9_]*$";};
             pathPrefix = {type = "string"; pattern = "^[A-Za-z0-9_./-]+$";};
             archiveExtension = {type = "string"; enum = ["tar.zst" "tar.gz" "tar.xz" "tar.bz2" "tgz" "tzst"];};
+            maxIncrementalsPerFull = {type = "integer"; minimum = 0; maximum = 9999;};
             pauseTimeoutSeconds = {type = "integer"; minimum = 1; maximum = 3600;};
             recoveryTopic = {type = "string";};
+            kafkaPropertiesKey = {type = "string"; minLength = 1;};
             credentialsSecret = {
               type = "object";
               properties = {
                 name = {type = "string";};
-                httpConfigKey = {type = "string"; minLength = 1;};
+                usernameKey = {type = "string"; minLength = 1;};
+                passwordKey = {type = "string"; minLength = 1;};
               };
             };
             successfulJobsHistoryLimit = {type = "integer"; minimum = 0;};
@@ -240,16 +246,40 @@ let
       {{- end }}
 
       {{- define "durable-clickhouse-sink.backupObjects" -}}
-      {{- $databases := dict .Values.clickhouse.database true -}}
+      {{- $tables := dict -}}
       {{- range $pipeline := .Values.pipelines -}}
-      {{- $_ := set $databases (default $.Values.clickhouse.database $pipeline.database) true -}}
+      {{- $database := default $.Values.clickhouse.database $pipeline.database -}}
+      {{- $_ := set $tables (printf "%s.%s" $database $pipeline.table) (dict "database" $database "table" $pipeline.table) -}}
       {{- end -}}
       {{- $first := true -}}
-      {{- range $database, $_ := $databases -}}
+      {{- range $key, $target := $tables -}}
       {{- if not $first }}, {{ end -}}
-      DATABASE {{ $database }}
+      TABLE {{ $target.database }}.{{ $target.table }}
       {{- $first = false -}}
       {{- end -}}
+      {{- end }}
+
+      {{- define "durable-clickhouse-sink.backupStateObjects" -}}
+      {{- $first := true -}}
+      {{- range $pipeline := .Values.pipelines -}}
+      {{- if not $first }}, {{ end -}}
+      TABLE {{ default $.Values.clickhouse.database $pipeline.database }}.{{ include "durable-clickhouse-sink.stateTable" (list $ $pipeline) }}
+      {{- $first = false -}}
+      {{- end -}}
+      {{- end }}
+
+      {{- define "durable-clickhouse-sink.backupPipelines" -}}
+      {{- $pipelines := list -}}
+      {{- range $pipeline := .Values.pipelines -}}
+      {{- $pipelines = append $pipelines (dict
+        "connector" (include "durable-clickhouse-sink.pipelineName" (list $ $pipeline))
+        "database" (default $.Values.clickhouse.database $pipeline.database)
+        "state_table" (include "durable-clickhouse-sink.stateTable" (list $ $pipeline))
+        "table" $pipeline.table
+        "topic" $pipeline.canonicalTopic
+        "partitions" (default $.Values.topics.partitions $pipeline.partitions)) -}}
+      {{- end -}}
+      {{- toJson $pipelines -}}
       {{- end }}
 
       {{- define "durable-clickhouse-sink.recoveryTopic" -}}
@@ -285,6 +315,11 @@ let
       {{- end }}
       {{- if and .Values.backup.enabled (not .Values.backup.credentialsSecret.name) }}
       {{- fail "backup.credentialsSecret.name is required when backups are enabled" }}
+      {{- end }}
+      {{- range $segment := splitList "/" (trimSuffix "/" .Values.backup.pathPrefix) }}
+      {{- if or (eq $segment "") (eq $segment ".") (eq $segment "..") }}
+      {{- fail "backup.pathPrefix must be a relative object path without empty, . or .. segments" }}
+      {{- end }}
       {{- end }}
     '';
 
@@ -839,47 +874,57 @@ let
                   - name: backup
                     image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
                     imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
-                    command: ["/bin/durable-clickhouse-backup"]
+                    command: ["/bin/durable-clickhouse-recovery", "backup"]
                     env:
                       - name: CONNECT_URL
                         value: http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083
                       - name: CLICKHOUSE_URL
                         value: {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }}
-                      - name: CONNECTOR_NAMES
-                        value: |-
-                          {{- range $pipeline := .Values.pipelines }}
-                          {{ include "durable-clickhouse-sink.pipelineName" (list $ $pipeline) }}
-                          {{- end }}
                       - name: BACKUP_OBJECTS
                         value: {{ include "durable-clickhouse-sink.backupObjects" . | trim | quote }}
+                      - name: BACKUP_STATE_OBJECTS
+                        value: {{ include "durable-clickhouse-sink.backupStateObjects" . | trim | quote }}
+                      - name: BACKUP_PIPELINES
+                        value: {{ include "durable-clickhouse-sink.backupPipelines" . | quote }}
                       - {name: BACKUP_NAMED_COLLECTION, value: {{ .Values.backup.namedCollection | quote }}}
                       - {name: BACKUP_PATH_PREFIX, value: {{ trimSuffix "/" .Values.backup.pathPrefix | quote }}}
                       - {name: BACKUP_ARCHIVE_EXTENSION, value: {{ .Values.backup.archiveExtension | quote }}}
+                      - {name: MAX_INCREMENTALS_PER_FULL, value: {{ .Values.backup.maxIncrementalsPerFull | quote }}}
                       - {name: PAUSE_TIMEOUT_SECONDS, value: {{ .Values.backup.pauseTimeoutSeconds | quote }}}
                       - {name: KAFKA_BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
                       - {name: KAFKA_RECOVERY_TOPIC, value: {{ include "durable-clickhouse-sink.recoveryTopic" . | quote }}}
                       {{- if .Values.kafka.existingSecret }}
-                      - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka/client.properties}
+                      - {name: KAFKA_PROPERTIES_FILE, value: /etc/kafka-recovery/client.properties}
                       {{- end }}
                       - name: BACKUP_RUN_ID
                         valueFrom:
                           fieldRef:
                             fieldPath: metadata.uid
+                      - name: CLICKHOUSE_USERNAME
+                        valueFrom:
+                          secretKeyRef:
+                            name: {{ .Values.backup.credentialsSecret.name }}
+                            key: {{ .Values.backup.credentialsSecret.usernameKey }}
+                      - name: CLICKHOUSE_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: {{ .Values.backup.credentialsSecret.name }}
+                            key: {{ .Values.backup.credentialsSecret.passwordKey }}
                     volumeMounts:
-                      - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
                       - {name: tmp, mountPath: /tmp}
                       {{- if .Values.kafka.existingSecret }}
-                      - {name: kafka-client, mountPath: /etc/kafka, readOnly: true}
+                      - {name: kafka-recovery-client, mountPath: /etc/kafka-recovery, readOnly: true}
                       {{- end }}
                 volumes:
-                  - name: clickhouse-credentials
-                    secret:
-                      secretName: {{ .Values.backup.credentialsSecret.name }}
-                      items:
-                        - key: {{ .Values.backup.credentialsSecret.httpConfigKey }}
-                          path: curl.config
                   - {name: tmp, emptyDir: {}}
-                  {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 18 }}
+                  {{- if .Values.kafka.existingSecret }}
+                  - name: kafka-recovery-client
+                    secret:
+                      secretName: {{ .Values.kafka.existingSecret }}
+                      items:
+                        - key: {{ .Values.backup.kafkaPropertiesKey }}
+                          path: client.properties
+                  {{- end }}
       {{- end }}
     '';
 

@@ -26,7 +26,6 @@
       pkgs = import nixpkgs {inherit system;};
       deduplicator = pkgs.callPackage ./nix/deduplicator.nix {};
       backup = pkgs.callPackage ./nix/backup.nix {};
-      backupTests = pkgs.callPackage ./nix/backup-tests.nix {inherit backup;};
       images = import ./nix/images.nix {inherit pkgs system backup deduplicator nix2container;};
       chartSource = pkgs.callPackage ./nix/chart.nix {};
       chart = pkgs.runCommand "durable-clickhouse-sink-chart-0.1.0" {nativeBuildInputs = [pkgs.kubernetes-helm];} ''
@@ -81,6 +80,7 @@
           suspend = true;
           namedCollection = "durable_backups";
           pathPrefix = "durable-e2e";
+          maxIncrementalsPerFull = 2;
           credentialsSecret.name = "clickhouse-credentials";
         };
         pipelines = [{
@@ -97,7 +97,7 @@
         }];
       };
     in {
-      inherit backup backupTests deduplicator chart chartSource e2eValues;
+      inherit backup deduplicator chart chartSource e2eValues;
       deduplicatorImage = images.deduplicator;
       connectImage = images.connect;
       manifests = nixidyEnv.environmentPackage;
@@ -109,7 +109,14 @@
       packages = self.packages.${system};
       pkgs = import nixpkgs {inherit system;};
     in {
-      inherit (packages) backupTests deduplicator manifests e2eManifests;
+      inherit (packages) backup deduplicator manifests e2eManifests;
+      e2eScript = pkgs.runCommand "check-e2e-script" {
+        nativeBuildInputs = [pkgs.bash pkgs.shellcheck];
+      } ''
+        bash -n ${./e2e/run-rke2.sh}
+        shellcheck ${./e2e/run-rke2.sh}
+        touch $out
+      '';
       chart = pkgs.runCommand "check-chart" {
         nativeBuildInputs = [pkgs.kubernetes-helm];
       } ''
@@ -127,6 +134,12 @@
         )
         helm lint --strict ${packages.chartSource} "''${chart_args[@]}"
         helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
+        helm template test ${packages.chartSource} "''${chart_args[@]}" \
+          --set-string 'pipelines[1].name=other' \
+          --set-string 'pipelines[1].rawTopic=other.raw' \
+          --set-string 'pipelines[1].canonicalTopic=other.canonical' \
+          --set-string 'pipelines[1].conflictTopic=other.conflicts' \
+          --set-string 'pipelines[1].table=events' > rendered-shared-table.yaml
 
         expect_rejected() {
           if helm template test ${packages.chartSource} "''${chart_args[@]}" "$@" >/dev/null 2>&1; then
@@ -138,6 +151,7 @@
         expect_rejected --set-string 'pipelines[0].rawRetentionMs=2592000000'
         expect_rejected --set backup.pauseTimeoutSeconds=0
         expect_rejected --set-string "backup.pathPrefix=invalid')"
+        expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
         expect_rejected --set-string 'pipelines[1].name=events' \
           --set-string 'pipelines[1].rawTopic=other.raw' \
           --set-string 'pipelines[1].canonicalTopic=other.canonical' \
@@ -148,13 +162,16 @@
           echo "backup unexpectedly uses server-local Disk metadata" >&2
           exit 1
         fi
-        grep -F '/bin/durable-clickhouse-backup' rendered.yaml >/dev/null
+        grep -F '/bin/durable-clickhouse-recovery' rendered.yaml >/dev/null
         grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
         grep -F 'BACKUP_NAMED_COLLECTION' rendered.yaml >/dev/null
+        grep -F 'BACKUP_PIPELINES' rendered.yaml >/dev/null
+        grep -F 'MAX_INCREMENTALS_PER_FULL' rendered.yaml >/dev/null
         grep -F 'KAFKA_RECOVERY_TOPIC' rendered.yaml >/dev/null
         grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
         grep -F '.recovery-points' rendered.yaml >/dev/null
         grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
+        [[ $(grep -c 'value: "TABLE default.events"' rendered-shared-table.yaml) == 1 ]]
         touch $out
       '';
     });

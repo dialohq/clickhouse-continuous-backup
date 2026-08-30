@@ -18,6 +18,9 @@ not only this repository's summaries.
 - [ClickHouse backup and restore overview](https://clickhouse.com/docs/operations/backup/overview)
 - [ClickHouse backup and restore through an S3 endpoint](https://clickhouse.com/docs/operations/backup/s3_endpoint)
 - [ClickHouse named collections](https://clickhouse.com/docs/operations/named-collections)
+- [ClickHouse incremental backup dependency contract](https://github.com/ClickHouse/clickhouse-docs/blob/main/docs/operations_/backup_restore/01_local_disk.md#incremental-backups)
+- [Confirmed ClickHouse append-file incremental backup defect #112403](https://github.com/ClickHouse/ClickHouse/issues/112403)
+- [ClickHouse external-backup lifecycle ownership](https://clickhouse.com/blog/introducing-external-backups-on-clickhouse-cloud)
 
 ## Production experience
 

@@ -6,26 +6,22 @@
 nix flake check
 ```
 
-The flake builds the Kotlin application, runs its stateful topology tests,
-packages and strictly lints the Helm chart, checks negative safety validation,
-renders the chart through Nixidy, and runs deterministic backup-job failure
-tests.
+The flake builds the Kotlin Kafka Streams application, runs its stateful
+topology tests, compiles the Rust recovery utility, runs its focused invariant
+tests, packages and strictly lints the Helm chart, checks negative safety
+validation, and renders the chart through Nixidy.
 
-The backup suite exercises:
+The Rust backup suite exercises:
 
-- connectors with no tasks, failed tasks, and a pre-existing paused state;
-- pause request failure and pause timeout;
-- ClickHouse request failure and malformed backup responses;
-- missing or mismatched `system.backups` confirmation;
-- unavailable, empty, or malformed Kafka Connect offset snapshots;
-- failure to publish the recovery manifest after a verified archive;
-- connector resumption after every post-preflight failure and `SIGTERM`;
-- a successful multi-connector backup with a unique destination, exact backup
-  verification, and exact per-partition offsets in the Kafka record;
-- restore rejection for malformed manifests, wrong archives, connector-set
-  mismatches, running or incompletely stopped connectors, offset API failure,
-  and read-back mismatch;
-- successful idempotent application of a multi-connector offset snapshot.
+- full/incremental chain planning, rollover, disabled incrementals, and corrupt
+  chain heads;
+- exact KeeperMap-derived offsets when Kafka Connect lags;
+- refusal of Connect-ahead, unfinished KeeperMap, duplicate, out-of-range,
+  overflow, and wrong-topic states, plus zero for never-ingested partitions;
+- manifest tampering across backup shape, connector identity, topic, partition,
+  observed offsets, exact offsets, and checkpoint identity;
+- MergeTree-family acceptance and refusal of append-only engines or a missing
+  KeeperMap table when incrementals are enabled.
 
 ## RKE2 end to end
 
@@ -54,12 +50,16 @@ restore ClickHouse/Keeper instances, and MinIO. It then verifies:
 5. an operator-paused connector makes the backup fail and remains paused;
 6. invalid ClickHouse backup credentials make the Job fail without leaving the
    connector paused or creating a backup;
-7. a direct-S3 backup is visible to an independent ClickHouse server;
-8. the database and KeeperMap checkpoint restore successfully;
-9. the compacted recovery record contains the backup's exact connector offsets;
-10. records written after the backup first reach the original target;
-11. Connect is stopped and rewound to the recorded offsets through its standard
-    API, then the restored target receives that tail exactly once;
+7. one full plus two incrementals are created, followed by a new full at the
+   configured limit;
+8. the incremental event-data tip and independent full KeeperMap checkpoint are
+   visible to and restore on a clean ClickHouse/Keeper server;
+9. the compacted recovery record contains exact KeeperMap-derived offsets and
+   the chain dependencies;
+10. the recovery utility refuses to patch until restored KeeperMap equals the
+    manifest, patches Connect while stopped, and verifies exact read-back;
+11. records written after the recovery point first reach the original target,
+    then replay exactly once into the restored target after cutover;
 12. the former target stops advancing after cutover.
 
 MinIO is test-only. Production uses an externally managed S3-compatible store,

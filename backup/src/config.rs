@@ -1,0 +1,189 @@
+use std::{collections::HashMap, env, fs, path::PathBuf, time::Duration};
+
+use anyhow::{Context, Result, bail};
+use serde::de::DeserializeOwned;
+
+use crate::model::Pipeline;
+
+#[derive(Clone, Debug)]
+pub struct BackupConfig {
+    pub connect_url: String,
+    pub clickhouse_url: String,
+    pub clickhouse_username: String,
+    pub clickhouse_password: String,
+    pub backup_objects: String,
+    pub backup_state_objects: String,
+    pub named_collection: String,
+    pub path_prefix: String,
+    pub archive_extension: String,
+    pub run_id: String,
+    pub pause_timeout: Duration,
+    pub kafka_bootstrap_servers: String,
+    pub kafka_properties_file: Option<PathBuf>,
+    pub recovery_topic: String,
+    pub max_incrementals_per_full: u32,
+    pub pipelines: Vec<Pipeline>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RestoreConfig {
+    pub connect_url: String,
+    pub clickhouse_url: String,
+    pub clickhouse_username: String,
+    pub clickhouse_password: String,
+    pub connector_names: Vec<String>,
+    pub expected_backup_name: String,
+    pub manifest_file: String,
+    pub stop_timeout: Duration,
+}
+
+impl BackupConfig {
+    pub fn from_environment() -> Result<Self> {
+        let run_id = required("BACKUP_RUN_ID")?;
+        validate_token("BACKUP_RUN_ID", &run_id, |character| {
+            character.is_ascii_alphanumeric() || character == '-'
+        })?;
+        let named_collection = identifier("BACKUP_NAMED_COLLECTION")?;
+        let path_prefix = required("BACKUP_PATH_PREFIX")?;
+        validate_token("BACKUP_PATH_PREFIX", &path_prefix, |character| {
+            character.is_ascii_alphanumeric() || "_./-".contains(character)
+        })?;
+        if !storage_path(&path_prefix) {
+            bail!(
+                "BACKUP_PATH_PREFIX must be a relative object path without empty, . or .. segments"
+            )
+        }
+        let archive_extension = required("BACKUP_ARCHIVE_EXTENSION")?;
+        if !["tar.zst", "tar.gz", "tar.xz", "tar.bz2", "tgz", "tzst"]
+            .contains(&archive_extension.as_str())
+        {
+            bail!("unsupported BACKUP_ARCHIVE_EXTENSION")
+        }
+        let pipelines: Vec<Pipeline> = json("BACKUP_PIPELINES")?;
+        if pipelines.is_empty() {
+            bail!("BACKUP_PIPELINES must contain at least one pipeline")
+        }
+        for pipeline in &pipelines {
+            pipeline.validate()?;
+        }
+        Ok(Self {
+            connect_url: required("CONNECT_URL")?,
+            clickhouse_url: required("CLICKHOUSE_URL")?,
+            clickhouse_username: required("CLICKHOUSE_USERNAME")?,
+            clickhouse_password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
+            backup_objects: required("BACKUP_OBJECTS")?,
+            backup_state_objects: required("BACKUP_STATE_OBJECTS")?,
+            named_collection,
+            path_prefix,
+            archive_extension,
+            run_id,
+            pause_timeout: seconds("PAUSE_TIMEOUT_SECONDS")?,
+            kafka_bootstrap_servers: required("KAFKA_BOOTSTRAP_SERVERS")?,
+            kafka_properties_file: optional("KAFKA_PROPERTIES_FILE").map(PathBuf::from),
+            recovery_topic: required("KAFKA_RECOVERY_TOPIC")?,
+            max_incrementals_per_full: unsigned("MAX_INCREMENTALS_PER_FULL")?,
+            pipelines,
+        })
+    }
+
+    pub fn kafka_properties(&self) -> Result<HashMap<String, String>> {
+        let Some(path) = &self.kafka_properties_file else {
+            return Ok(HashMap::new());
+        };
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read Kafka properties from {}", path.display()))?;
+        contents
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with(['#', '!']))
+            .map(parse_property)
+            .collect()
+    }
+}
+
+impl RestoreConfig {
+    pub fn from_environment() -> Result<Self> {
+        let connector_names = required("CONNECTOR_NAMES")?
+            .lines()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if connector_names.is_empty() {
+            bail!("CONNECTOR_NAMES must contain at least one connector")
+        }
+        Ok(Self {
+            connect_url: required("CONNECT_URL")?,
+            clickhouse_url: required("CLICKHOUSE_URL")?,
+            clickhouse_username: required("CLICKHOUSE_USERNAME")?,
+            clickhouse_password: env::var("CLICKHOUSE_PASSWORD").unwrap_or_default(),
+            connector_names,
+            expected_backup_name: required("EXPECTED_BACKUP_NAME")?,
+            manifest_file: required("RECOVERY_MANIFEST_FILE")?,
+            stop_timeout: seconds("STOP_TIMEOUT_SECONDS")?,
+        })
+    }
+}
+
+fn required(name: &str) -> Result<String> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("{name} is required"))
+}
+
+fn optional(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn seconds(name: &str) -> Result<Duration> {
+    let value = required(name)?
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be a positive integer"))?;
+    if value == 0 {
+        bail!("{name} must be a positive integer")
+    }
+    Ok(Duration::from_secs(value))
+}
+
+fn unsigned(name: &str) -> Result<u32> {
+    required(name)?
+        .parse()
+        .with_context(|| format!("{name} must be a non-negative integer"))
+}
+
+fn json<T: DeserializeOwned>(name: &str) -> Result<T> {
+    serde_json::from_str(&required(name)?).with_context(|| format!("{name} must be valid JSON"))
+}
+
+fn identifier(name: &str) -> Result<String> {
+    let value = required(name)?;
+    let mut characters = value.chars();
+    if !characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        bail!("{name} must be a ClickHouse identifier")
+    }
+    Ok(value)
+}
+
+fn validate_token(name: &str, value: &str, allowed: impl Fn(char) -> bool) -> Result<()> {
+    if value.is_empty() || !value.chars().all(allowed) {
+        bail!("{name} contains unsupported characters")
+    }
+    Ok(())
+}
+
+fn storage_path(value: &str) -> bool {
+    !value.starts_with('/')
+        && value
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn parse_property(line: &str) -> Result<(String, String)> {
+    let (key, value) = line
+        .split_once(['=', ':'])
+        .with_context(|| format!("invalid Kafka property: {line}"))?;
+    Ok((key.trim().to_owned(), value.trim().to_owned()))
+}

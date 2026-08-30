@@ -31,6 +31,13 @@ the retry.
 These are two coordinated exactly-once scopes, not a distributed transaction
 from the producer's local storage through ClickHouse.
 
+At a recovery point, connectors are drained and paused. The manifest derives
+the next Kafka offset from the backed-up KeeperMap `maxOffset + 1`, not from a
+potentially lagging Kafka Connect commit. Event data and a full KeeperMap
+checkpoint are backed up separately. Recovery verifies the restored KeeperMap
+against the manifest before patching Connect, then verifies Connect's read-back
+before it may be resumed.
+
 ## What is and is not promised
 
 The chart guarantees no duplicate canonical record within `D`, and no duplicate
@@ -47,6 +54,8 @@ It does not guarantee:
   internal topics;
 - correctness after manually rewinding only Kafka consumer offsets or only the
   connector's KeeperMap state.
+- safe incremental backup of target engines outside the MergeTree family;
+- automatic object-store retention or deletion of incremental dependencies.
 
 Required retention relationships are:
 
