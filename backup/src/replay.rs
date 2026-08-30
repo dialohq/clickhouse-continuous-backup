@@ -66,14 +66,7 @@ impl KafkaReplay {
     }
 
     pub fn verify_starts(&self, starts: &[RecoveryOffset]) -> Result<()> {
-        let consumer: StreamConsumer = self.consumer_config("start-validation")?.create()?;
-        for start in starts {
-            let partition = i32::try_from(start.partition).context("partition exceeds i32")?;
-            let (low, high) =
-                consumer.fetch_watermarks(&start.topic, partition, self.metadata_timeout)?;
-            validate_range(start.offset, start.offset, low, high)?;
-        }
-        Ok(())
+        self.verify_ranges(starts, starts)
     }
 
     pub fn verify_replay_retained(&self, offsets: &[RecoveryOffset]) -> Result<()> {
