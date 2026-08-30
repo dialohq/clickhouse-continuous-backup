@@ -419,25 +419,18 @@ pub fn validate_manifest(point: &BackupManifest) -> Result<()> {
     {
         bail!("invalid backup manifest")
     }
-    let mut names = point
-        .connectors
-        .iter()
-        .map(|connector| &connector.name)
-        .collect::<Vec<_>>();
-    names.sort_unstable();
-    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+    if has_duplicates(
+        point
+            .connectors
+            .iter()
+            .map(|connector| &connector.name)
+            .collect(),
+    ) {
         bail!("invalid backup manifest")
     }
     for connector in &point.connectors {
         validate_offsets(&connector.offsets)?;
         validate_offsets(&connector.observed_connect_offsets)?;
-        let mut row_keys = connector
-            .keeper
-            .rows
-            .iter()
-            .map(|row| &row.key)
-            .collect::<Vec<_>>();
-        row_keys.sort_unstable();
         if !kafka_name(&connector.name)
             || !kafka_name(&connector.topic)
             || connector.partitions == 0
@@ -454,7 +447,7 @@ pub fn validate_manifest(point: &BackupManifest) -> Result<()> {
                 offset.partition.kafka_topic != connector.topic
                     || offset.partition.kafka_partition >= connector.partitions
             })
-            || row_keys.windows(2).any(|pair| pair[0] == pair[1])
+            || has_duplicates(connector.keeper.rows.iter().map(|row| &row.key).collect())
         {
             bail!("invalid backup manifest")
         }
@@ -505,6 +498,11 @@ pub fn validate_manifest(point: &BackupManifest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn has_duplicates<T: Ord>(mut values: Vec<T>) -> bool {
+    values.sort_unstable();
+    values.windows(2).any(|pair| pair[0] == pair[1])
 }
 
 fn clickhouse_identifier(value: &str) -> bool {

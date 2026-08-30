@@ -116,13 +116,7 @@ impl BackupConfig {
         {
             bail!("unsupported BACKUP_ARCHIVE_EXTENSION")
         }
-        let pipelines: Vec<Pipeline> = json("BACKUP_PIPELINES")?;
-        if pipelines.is_empty() {
-            bail!("BACKUP_PIPELINES must contain at least one pipeline")
-        }
-        for pipeline in &pipelines {
-            pipeline.validate()?;
-        }
+        let pipelines = pipelines()?;
         Ok(Self {
             connect_url: required("CONNECT_URL")?,
             clickhouse_url: required("CLICKHOUSE_URL")?,
@@ -150,13 +144,7 @@ impl BackupConfig {
 
 impl TargetConfig {
     pub fn from_environment() -> Result<Self> {
-        let pipelines: Vec<Pipeline> = json("BACKUP_PIPELINES")?;
-        if pipelines.is_empty() {
-            bail!("BACKUP_PIPELINES must contain at least one pipeline")
-        }
-        for pipeline in &pipelines {
-            pipeline.validate()?;
-        }
+        let pipelines = pipelines()?;
         let credentials = optional("CLICKHOUSE_PROPERTIES_FILE")
             .map(|path| read_properties(&PathBuf::from(path), "ClickHouse"))
             .transpose()?;
@@ -241,6 +229,15 @@ fn unsigned64(name: &str) -> Result<u64> {
 
 fn json<T: DeserializeOwned>(name: &str) -> Result<T> {
     serde_json::from_str(&required(name)?).with_context(|| format!("{name} must be valid JSON"))
+}
+
+fn pipelines() -> Result<Vec<Pipeline>> {
+    let pipelines: Vec<Pipeline> = json("BACKUP_PIPELINES")?;
+    if pipelines.is_empty() {
+        bail!("BACKUP_PIPELINES must contain at least one pipeline")
+    }
+    pipelines.iter().try_for_each(Pipeline::validate)?;
+    Ok(pipelines)
 }
 
 fn identifier(name: &str) -> Result<String> {
