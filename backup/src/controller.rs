@@ -17,17 +17,26 @@ use crate::{
     connect::Connect,
     metadata::{BackupMetadataReader, KafkaBackupMetadataReader},
     model::{KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperRow},
-    recovery_resource::{RecoveryOffset, RecoveryPlan, TableRecovery, TableRecoveryStatus},
-    replay::{KafkaReplay, kafka_identity},
+    recovery_resource::{
+        RecoveryMode, RecoveryOffset, RecoveryPhase, RecoveryPlan, TableRecovery,
+        TableRecoveryStatus,
+    },
+    replay::{KafkaRangeCopier, kafka_identity},
 };
 
-struct Context {
+struct RecoveryContext {
     client: Client,
     config: ControllerConfig,
     connect: Connect,
     clickhouse: ClickHouse,
-    replay: KafkaReplay,
+    range_copier: KafkaRangeCopier,
     kafka_properties: std::collections::HashMap<String, String>,
+}
+
+#[derive(Clone, Copy)]
+enum FollowBehavior {
+    Bounded,
+    Live,
 }
 
 #[derive(Debug)]
@@ -52,7 +61,7 @@ pub async fn run(path: &Path) -> Result<()> {
         config.clickhouse_password.clone(),
         &config.timeouts,
     )?;
-    let replay = KafkaReplay::new(
+    let range_copier = KafkaRangeCopier::new(
         config.kafka_bootstrap_servers.clone(),
         kafka_properties.clone(),
         config.replay_topic_replication_factor,
@@ -61,12 +70,12 @@ pub async fn run(path: &Path) -> Result<()> {
         &config.timeouts,
     );
     let resources = Api::<TableRecovery>::namespaced(client.clone(), &config.namespace);
-    let context = Arc::new(Context {
+    let context = Arc::new(RecoveryContext {
         client,
         config,
         connect,
         clickhouse,
-        replay,
+        range_copier,
         kafka_properties,
     });
     Controller::new(resources, watcher::Config::default())
@@ -82,7 +91,7 @@ pub async fn run(path: &Path) -> Result<()> {
 
 async fn reconcile(
     resource: Arc<TableRecovery>,
-    context: Arc<Context>,
+    context: Arc<RecoveryContext>,
 ) -> std::result::Result<Action, ReconcileError> {
     match reconcile_recovery(&resource, &context).await {
         Ok(action) => Ok(action),
@@ -95,12 +104,12 @@ async fn reconcile(
     }
 }
 
-async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Result<Action> {
-    let phase = resource
-        .status
-        .as_ref()
-        .and_then(|status| status.phase.as_deref());
-    if matches!(phase, Some("Complete" | "Streaming")) {
+async fn reconcile_recovery(resource: &TableRecovery, context: &RecoveryContext) -> Result<Action> {
+    let phase = resource.status.as_ref().and_then(|status| status.phase);
+    if matches!(
+        phase,
+        Some(RecoveryPhase::Complete | RecoveryPhase::Streaming)
+    ) {
         return Ok(Action::await_change());
     }
     if resource.spec.source.database == resource.spec.destination.database
@@ -118,19 +127,20 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
         &uid,
         &context.config.timeouts,
     )?;
-    let point = metadata
+    let manifest = metadata
         .load_manifest(&resource.spec.source.backup_id)
         .await?
         .context("backup manifest was not found in metadata storage")?;
-    validate_manifest(&point)?;
-    let plan = RecoveryPlan::new(&resource.spec, &point)?;
-    if let Some(targets) = &plan.target_offsets {
-        context.replay.verify_ranges(&plan.start_offsets, targets)?;
-    } else {
-        context.replay.verify_starts(&plan.start_offsets)?;
+    validate_manifest(&manifest)?;
+    let plan = RecoveryPlan::new(&resource.spec, &manifest)?;
+    match &plan.mode {
+        RecoveryMode::PointInTime { target_offsets } => context
+            .range_copier
+            .verify_ranges(&plan.start_offsets, target_offsets)?,
+        RecoveryMode::Follow => context.range_copier.verify_starts(&plan.start_offsets)?,
     }
 
-    let rows = context
+    let destination_rows = context
         .clickhouse
         .destination_rows(
             &resource.spec.destination.database,
@@ -138,22 +148,30 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
         )
         .await?;
     if phase.is_none() {
-        if rows != 0 {
+        if destination_rows != 0 {
             bail!("a new recovery requires an empty destination table")
         }
-        update_phase(resource, context, "Restoring", &plan, vec![], vec![]).await?;
+        update_phase(
+            resource,
+            context,
+            RecoveryPhase::Restoring,
+            &plan,
+            vec![],
+            vec![],
+        )
+        .await?;
     }
-    if phase != Some("Replaying") {
+    if phase != Some(RecoveryPhase::Replaying) {
         match context
             .clickhouse
-            .restore_state(&uid, &point.backup.name)
+            .restore_state(&uid, &manifest.backup.name)
             .await?
         {
             RestoreState::Restored => {}
             RestoreState::Running => {
                 return Ok(Action::requeue(context.config.timeouts.controller_retry));
             }
-            RestoreState::Missing if rows == 0 => {
+            RestoreState::Missing if destination_rows == 0 => {
                 context
                     .clickhouse
                     .restore_table(
@@ -161,7 +179,7 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
                         &resource.spec.source.table,
                         &resource.spec.destination.database,
                         &resource.spec.destination.table,
-                        &point.backup.name,
+                        &manifest.backup.name,
                         &uid,
                     )
                     .await?;
@@ -173,44 +191,56 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
             }
         }
     }
-    update_phase(resource, context, "Replaying", &plan, vec![], vec![]).await?;
+    update_phase(
+        resource,
+        context,
+        RecoveryPhase::Replaying,
+        &plan,
+        vec![],
+        vec![],
+    )
+    .await?;
 
     let mut replay_connectors = Vec::new();
     let mut follow_connectors = Vec::new();
     for (index, checkpoint) in plan.connectors.iter().enumerate() {
         let source_config = context.connect.config(&checkpoint.name).await?;
-        let (follow_offsets, resume) = if let Some(targets) = &plan.target_offsets {
-            let starts = topic_offsets(&plan.start_offsets, &checkpoint.topic);
-            let targets = topic_offsets(targets, &checkpoint.topic);
-            if starts != targets {
-                let replay_topic = replay_topic(&uid, index)?;
-                let replay_offsets = context
-                    .replay
-                    .copy(
-                        &uid,
-                        &index.to_string(),
-                        &checkpoint.topic,
+        let (follow_offsets, follow_behavior) = match &plan.mode {
+            RecoveryMode::PointInTime { target_offsets } => {
+                let starts = topic_offsets(&plan.start_offsets, &checkpoint.topic);
+                let targets = topic_offsets(target_offsets, &checkpoint.topic);
+                if starts != targets {
+                    let replay_topic = replay_topic(&uid, index)?;
+                    let replay_offsets = context
+                        .range_copier
+                        .copy(
+                            &uid,
+                            &index.to_string(),
+                            &checkpoint.topic,
+                            &replay_topic,
+                            &starts,
+                            &targets,
+                        )
+                        .await?;
+                    let connector = connector_name(&uid, "replay", index);
+                    run_replay_connector(
+                        context,
+                        resource,
+                        &source_config,
+                        &connector,
                         &replay_topic,
-                        &starts,
-                        &targets,
+                        index,
+                        &replay_offsets,
                     )
                     .await?;
-                let connector = connector_name(&uid, "replay", index);
-                run_replay_connector(
-                    context,
-                    resource,
-                    &source_config,
-                    &connector,
-                    &replay_topic,
-                    index,
-                    &replay_offsets,
-                )
-                .await?;
-                replay_connectors.push(connector);
+                    replay_connectors.push(connector);
+                }
+                (targets, FollowBehavior::Bounded)
             }
-            (targets, false)
-        } else {
-            (topic_offsets(&plan.start_offsets, &checkpoint.topic), true)
+            RecoveryMode::Follow => (
+                topic_offsets(&plan.start_offsets, &checkpoint.topic),
+                FollowBehavior::Live,
+            ),
         };
         let connector = connector_name(&uid, "follow", index);
         ensure_follow_connector(
@@ -221,15 +251,14 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
             checkpoint,
             &follow_offsets,
             index,
-            resume,
+            follow_behavior,
         )
         .await?;
         follow_connectors.push(connector);
     }
-    let phase = if plan.target_offsets.is_some() {
-        "Complete"
-    } else {
-        "Streaming"
+    let phase = match &plan.mode {
+        RecoveryMode::PointInTime { .. } => RecoveryPhase::Complete,
+        RecoveryMode::Follow => RecoveryPhase::Streaming,
     };
     update_phase(
         resource,
@@ -244,7 +273,7 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
 }
 
 async fn run_replay_connector(
-    context: &Context,
+    context: &RecoveryContext,
     resource: &TableRecovery,
     source_config: &Map<String, Value>,
     connector: &str,
@@ -252,7 +281,7 @@ async fn run_replay_connector(
     index: usize,
     end_offsets: &[RecoveryOffset],
 ) -> Result<()> {
-    context.replay.verify_replay_retained(end_offsets)?;
+    context.range_copier.verify_replay_retained(end_offsets)?;
     let state_table = state_table(resource, "replay", index)?;
     let keeper_path = keeper_path(resource, "replay", index)?;
     context
@@ -307,19 +336,19 @@ async fn run_replay_connector(
         .connect
         .require_stopped(connector, context.config.timeouts.recovery_catchup)
         .await?;
-    context.replay.verify_replay_retained(end_offsets)
+    context.range_copier.verify_replay_retained(end_offsets)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn ensure_follow_connector(
-    context: &Context,
+    context: &RecoveryContext,
     resource: &TableRecovery,
     source_config: &Map<String, Value>,
     connector: &str,
     checkpoint: &crate::model::ConnectorCheckpoint,
     offsets: &[RecoveryOffset],
     index: usize,
-    resume: bool,
+    behavior: FollowBehavior,
 ) -> Result<()> {
     let state_table = state_table(resource, "follow", index)?;
     let keeper_path = keeper_path(resource, "follow", index)?;
@@ -374,7 +403,7 @@ async fn ensure_follow_connector(
             &rows,
         )
         .await?;
-    } else if resume {
+    } else if matches!(behavior, FollowBehavior::Live) {
         validate_keeper_progress(&existing_rows, &rows, &offsets)?;
     } else {
         ensure_keeper_rows(
@@ -389,7 +418,7 @@ async fn ensure_follow_connector(
             bail!("bounded follow connector moved beyond its requested target")
         }
     }
-    if resume {
+    if matches!(behavior, FollowBehavior::Live) {
         context.connect.resume(connector).await?;
         context
             .connect
@@ -466,7 +495,7 @@ async fn ensure_keeper_rows(
 }
 
 fn connector_config(
-    context: &Context,
+    context: &RecoveryContext,
     resource: &TableRecovery,
     source: &Map<String, Value>,
     topic: &str,
@@ -587,8 +616,8 @@ fn keeper_path(resource: &TableRecovery, role: &str, index: usize) -> Result<Str
 
 async fn update_phase(
     resource: &TableRecovery,
-    context: &Context,
-    phase: &str,
+    context: &RecoveryContext,
+    phase: RecoveryPhase,
     plan: &RecoveryPlan,
     replay_connectors: Vec<String>,
     follow_connectors: Vec<String>,
@@ -598,18 +627,17 @@ async fn update_phase(
         context,
         TableRecoveryStatus {
             observed_generation: resource.metadata.generation,
-            phase: Some(phase.to_owned()),
+            phase: Some(phase),
             resolved_start_offsets: Some(plan.start_offsets.clone()),
-            resolved_target_offsets: plan.target_offsets.clone(),
+            resolved_target_offsets: match &plan.mode {
+                RecoveryMode::PointInTime { target_offsets } => Some(target_offsets.clone()),
+                RecoveryMode::Follow => None,
+            },
             replay_connectors: Some(replay_connectors),
             follow_connectors: Some(follow_connectors),
             conditions: vec![condition(
                 "Ready",
-                if matches!(phase, "Complete" | "Streaming") {
-                    "True"
-                } else {
-                    "False"
-                },
+                if phase.is_ready() { "True" } else { "False" },
                 phase,
                 &format!("TableRecovery is {phase}"),
             )],
@@ -620,7 +648,7 @@ async fn update_phase(
 
 async fn patch_status(
     resource: &TableRecovery,
-    context: &Context,
+    context: &RecoveryContext,
     status: TableRecoveryStatus,
 ) -> Result<()> {
     let resources =
@@ -637,7 +665,7 @@ async fn patch_status(
 
 async fn patch_failure(
     resource: &TableRecovery,
-    context: &Context,
+    context: &RecoveryContext,
     error: &anyhow::Error,
 ) -> Result<()> {
     let resources =
@@ -660,13 +688,13 @@ async fn patch_failure(
 fn condition(
     condition_type: &str,
     status: &str,
-    reason: &str,
+    reason: impl std::fmt::Display,
     message: &impl std::fmt::Display,
 ) -> crate::recovery_resource::RecoveryCondition {
     crate::recovery_resource::RecoveryCondition {
         condition_type: condition_type.to_owned(),
         status: status.to_owned(),
-        reason: reason.to_owned(),
+        reason: reason.to_string(),
         message: message.to_string(),
         last_transition_time: Utc::now().to_rfc3339(),
     }
@@ -675,7 +703,7 @@ fn condition(
 fn error_policy(
     _resource: Arc<TableRecovery>,
     _error: &ReconcileError,
-    context: Arc<Context>,
+    context: Arc<RecoveryContext>,
 ) -> Action {
     Action::requeue(context.config.timeouts.controller_retry)
 }

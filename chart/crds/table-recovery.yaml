@@ -104,6 +104,12 @@ spec:
                 nullable: true
                 type: integer
               phase:
+                enum:
+                - Restoring
+                - Replaying
+                - Complete
+                - Streaming
+                - null
                 nullable: true
                 type: string
               replayConnectors:

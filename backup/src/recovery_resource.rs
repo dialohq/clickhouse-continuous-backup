@@ -51,7 +51,7 @@ pub struct RecoveryOffset {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableRecoveryStatus {
     pub observed_generation: Option<i64>,
-    pub phase: Option<String>,
+    pub phase: Option<RecoveryPhase>,
     pub resolved_start_offsets: Option<Vec<RecoveryOffset>>,
     pub resolved_target_offsets: Option<Vec<RecoveryOffset>>,
     pub replay_connectors: Option<Vec<String>>,
@@ -60,15 +60,46 @@ pub struct TableRecoveryStatus {
     pub conditions: Vec<RecoveryCondition>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub enum RecoveryPhase {
+    Restoring,
+    Replaying,
+    Complete,
+    Streaming,
+}
+
+impl RecoveryPhase {
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Complete | Self::Streaming)
+    }
+}
+
+impl std::fmt::Display for RecoveryPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Restoring => "Restoring",
+            Self::Replaying => "Replaying",
+            Self::Complete => "Complete",
+            Self::Streaming => "Streaming",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryPlan {
     pub connectors: Vec<ConnectorCheckpoint>,
     pub start_offsets: Vec<RecoveryOffset>,
-    pub target_offsets: Option<Vec<RecoveryOffset>>,
+    pub mode: RecoveryMode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveryMode {
+    PointInTime { target_offsets: Vec<RecoveryOffset> },
+    Follow,
 }
 
 impl RecoveryPlan {
-    pub fn new(spec: &TableRecoverySpec, point: &BackupManifest) -> Result<Self> {
+    pub fn new(spec: &TableRecoverySpec, manifest: &BackupManifest) -> Result<Self> {
         for (name, value) in [
             ("source database", &spec.source.database),
             ("source table", &spec.source.table),
@@ -79,10 +110,10 @@ impl RecoveryPlan {
                 bail!("{name} must be a ClickHouse identifier")
             }
         }
-        if point.backup.id.to_string() != spec.source.backup_id {
+        if manifest.backup.id.to_string() != spec.source.backup_id {
             bail!("backup ID does not match the requested source")
         }
-        let connectors = point
+        let connectors = manifest
             .connectors
             .iter()
             .filter(|checkpoint| {
@@ -94,15 +125,16 @@ impl RecoveryPlan {
             bail!("recovery point does not contain the requested source table")
         }
         let start_offsets = flatten_offsets(&connectors)?;
-        let target_offsets = spec
-            .target_offsets
-            .as_ref()
-            .map(|targets| validate_targets(&start_offsets, targets))
-            .transpose()?;
+        let mode = match &spec.target_offsets {
+            Some(targets) => RecoveryMode::PointInTime {
+                target_offsets: validate_targets(&start_offsets, targets)?,
+            },
+            None => RecoveryMode::Follow,
+        };
         Ok(Self {
             connectors,
             start_offsets,
-            target_offsets,
+            mode,
         })
     }
 }
@@ -243,7 +275,7 @@ mod tests {
                 kind: BackupKind::Full,
                 chain_id: "chain".to_owned(),
                 position: 0,
-                base: None,
+                parent: None,
             },
             connectors: vec![
                 checkpoint("one", "one.input", "events", "records"),
@@ -291,7 +323,7 @@ mod tests {
         let plan = RecoveryPlan::new(&spec(id, None), &point(id)).unwrap();
         assert_eq!(plan.connectors.len(), 2);
         assert_eq!(plan.start_offsets.len(), 4);
-        assert_eq!(plan.target_offsets, None);
+        assert_eq!(plan.mode, RecoveryMode::Follow);
     }
 
     #[test]
@@ -320,7 +352,12 @@ mod tests {
             },
         ];
         let plan = RecoveryPlan::new(&spec(id, Some(targets)), &point(id)).unwrap();
-        let targets = plan.target_offsets.unwrap();
+        let RecoveryMode::PointInTime {
+            target_offsets: targets,
+        } = plan.mode
+        else {
+            panic!("expected point-in-time recovery")
+        };
         assert_eq!(targets[0].topic, "one.input");
         assert_eq!(targets[0].offset, 15);
     }

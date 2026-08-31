@@ -12,7 +12,7 @@ use rdkafka::{
 
 use crate::{config::RuntimeTimeouts, recovery_resource::RecoveryOffset};
 
-pub struct KafkaReplay {
+pub struct KafkaRangeCopier {
     bootstrap_servers: String,
     properties: HashMap<String, String>,
     metadata_timeout: Duration,
@@ -24,7 +24,7 @@ pub struct KafkaReplay {
     batch_records: usize,
 }
 
-impl KafkaReplay {
+impl KafkaRangeCopier {
     pub fn new(
         bootstrap_servers: String,
         properties: HashMap<String, String>,
