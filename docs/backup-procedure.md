@@ -96,6 +96,5 @@ before committing its manifest.
 | `snapshot::capture_checkpoints` and `backup::checkpoint` | KeeperMap-to-Kafka offset derivation |
 | `KafkaLog::require_offsets_replayable` | Proves every recorded offset still exists in Kafka |
 | `ClickHouse::clone_target` | Copy-on-write immutable part snapshot |
-| `upload_and_verify_immutable_snapshots` | Long snapshot compression, object-store upload, and ClickHouse status verification after resume |
-| `build_manifest` and `validate_manifest` | Manifest construction and validation |
-| `commit_completed_backup` | Step 10, the commit point |
+| `create_backup` | The complete capture, resume, upload, verification, manifest, and catalog-commit sequence |
+| `validate_manifest` | Independently tested manifest validation |
