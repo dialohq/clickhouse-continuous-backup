@@ -30,7 +30,7 @@ impl KafkaLog {
         })
     }
 
-    pub fn verify(&self, checkpoints: &[ConnectorCheckpoint]) -> Result<()> {
+    pub fn require_offsets_replayable(&self, checkpoints: &[ConnectorCheckpoint]) -> Result<()> {
         for checkpoint in checkpoints {
             let metadata = self
                 .consumer

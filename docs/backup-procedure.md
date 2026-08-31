@@ -91,9 +91,11 @@ before committing its manifest.
 | --- | --- |
 | `run` | Preconditions, backup lock, chain planning, signal handling, final resume and cleanup |
 | `SnapshotLayout::new` | Physical-table grouping and deterministic clone names |
-| `SnapshotLayout::create` | Short per-group barriers in step 4 |
+| `SnapshotLayout::capture_immutable_snapshots_during_short_ingestion_pauses` | Runs the short per-table barriers in step 4 and resumes each group |
+| `snapshot::pause_ingestion_and_capture_snapshot` | Pauses and drains ingestion, captures state, clones the table, and proves the checkpoint stayed fixed |
 | `snapshot::capture_checkpoints` and `backup::checkpoint` | KeeperMap-to-Kafka offset derivation |
+| `KafkaLog::require_offsets_replayable` | Proves every recorded offset still exists in Kafka |
 | `ClickHouse::clone_target` | Copy-on-write immutable part snapshot |
-| `create_archives` | Long target snapshot upload after resume |
+| `upload_and_verify_immutable_snapshots` | Long snapshot compression, object-store upload, and ClickHouse status verification after resume |
 | `build_manifest` and `validate_manifest` | Manifest construction and validation |
-| `commit_manifest` | Step 10, the commit point |
+| `commit_completed_backup` | Step 10, the commit point |

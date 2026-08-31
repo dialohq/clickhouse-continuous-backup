@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Result, bail};
 
 use crate::{
-    backup::{checkpoint, require_unchanged_keeper, resume_all},
+    backup::{checkpoint, require_unchanged_keeper, resume_ingestion},
     clickhouse::ClickHouse,
     config::BackupConfig,
     connect::Connect,
@@ -21,7 +21,7 @@ struct SnapshotTable {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SnapshotGroup {
     pipelines: Vec<Pipeline>,
-    targets: Vec<SnapshotTable>,
+    target: SnapshotTable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,40 +31,30 @@ pub(crate) struct SnapshotLayout {
 
 impl SnapshotLayout {
     pub(crate) fn new(run_id: &str, pipelines: &[Pipeline]) -> Self {
-        let mut grouped = BTreeMap::<String, Vec<Pipeline>>::new();
+        let mut grouped = BTreeMap::<(String, String), Vec<Pipeline>>::new();
         for pipeline in pipelines {
-            let key = format!("{}.{}", pipeline.database, pipeline.table);
+            let key = (pipeline.database.clone(), pipeline.table.clone());
             grouped.entry(key).or_default().push(pipeline.clone());
         }
 
         let run_id = run_id.replace('-', "_");
-        let mut target_index = 0;
         let groups = grouped
-            .into_values()
-            .map(|mut pipelines| {
+            .into_iter()
+            .enumerate()
+            .map(|(target_index, ((database, source), mut pipelines))| {
                 pipelines.sort_by(|left, right| left.connector.cmp(&right.connector));
-                let targets = pipelines
-                    .iter()
-                    .map(|pipeline| (pipeline.database.clone(), pipeline.table.clone()))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .map(|(database, source)| {
-                        let snapshot = format!("__dcs_{run_id}_target_{target_index}");
-                        target_index += 1;
-                        SnapshotTable {
-                            database,
-                            source,
-                            snapshot,
-                        }
-                    })
-                    .collect();
-                SnapshotGroup { pipelines, targets }
+                let target = SnapshotTable {
+                    database,
+                    source,
+                    snapshot: format!("__dcs_{run_id}_target_{target_index}"),
+                };
+                SnapshotGroup { pipelines, target }
             })
             .collect();
         Self { groups }
     }
 
-    pub(crate) async fn create(
+    pub(crate) async fn capture_immutable_snapshots_during_short_ingestion_pauses(
         &self,
         config: &BackupConfig,
         connect: &Connect,
@@ -80,32 +70,30 @@ impl SnapshotLayout {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
-            let barrier = async {
-                pause_delivery(config, connect, &connectors).await?;
-                let captured = capture_checkpoints(connect, clickhouse, &group.pipelines).await?;
-                kafka.verify(&captured)?;
-                for table in &group.targets {
-                    clickhouse
-                        .clone_target(&table.database, &table.source, &table.snapshot)
-                        .await?;
-                }
-                require_stable_checkpoint(connect, clickhouse, &group.pipelines, &captured).await?;
-                Ok::<_, anyhow::Error>(captured)
-            }
+            let snapshot = pause_ingestion_and_capture_snapshot(
+                config,
+                connect,
+                clickhouse,
+                kafka,
+                group,
+                &connectors,
+            )
             .await;
-            let resume = resume_all(connect, &connectors).await;
-            match (barrier, resume) {
+            let resume = resume_ingestion(connect, &connectors).await;
+            match (snapshot, resume) {
                 (Ok(captured), Ok(())) => checkpoints.extend(captured),
-                (Err(barrier), Ok(())) => return Err(barrier),
+                (Err(snapshot), Ok(())) => return Err(snapshot),
                 (Ok(_), Err(resume)) => return Err(resume),
-                (Err(barrier), Err(resume)) => return Err(barrier.context(resume)),
+                (Err(snapshot), Err(resume)) => return Err(snapshot.context(resume)),
             }
         }
         Ok(checkpoints)
     }
 
     pub(crate) fn backup_objects(&self) -> String {
-        self.targets()
+        self.groups
+            .iter()
+            .map(|group| &group.target)
             .map(|table| {
                 format!(
                     "TABLE `{}`.`{}` AS `{}`.`{}`",
@@ -118,7 +106,7 @@ impl SnapshotLayout {
 
     pub(crate) async fn cleanup(&self, clickhouse: &ClickHouse) -> Result<()> {
         let mut failures = Vec::new();
-        for table in self.targets() {
+        for table in self.groups.iter().map(|group| &group.target) {
             if let Err(error) = clickhouse
                 .drop_table(&table.database, &table.snapshot)
                 .await
@@ -132,13 +120,28 @@ impl SnapshotLayout {
             bail!("snapshot cleanup failed: {}", failures.join(", "))
         }
     }
-
-    fn targets(&self) -> impl Iterator<Item = &SnapshotTable> {
-        self.groups.iter().flat_map(|group| &group.targets)
-    }
 }
 
-async fn pause_delivery(
+async fn pause_ingestion_and_capture_snapshot(
+    config: &BackupConfig,
+    connect: &Connect,
+    clickhouse: &ClickHouse,
+    kafka: &KafkaLog,
+    group: &SnapshotGroup,
+    connectors: &[&str],
+) -> Result<Vec<ConnectorCheckpoint>> {
+    pause_ingestion(config, connect, connectors).await?;
+    let checkpoints = capture_checkpoints(connect, clickhouse, &group.pipelines).await?;
+    kafka.require_offsets_replayable(&checkpoints)?;
+    let table = &group.target;
+    clickhouse
+        .clone_target(&table.database, &table.source, &table.snapshot)
+        .await?;
+    require_unchanged_checkpoint(connect, clickhouse, &group.pipelines, &checkpoints).await?;
+    Ok(checkpoints)
+}
+
+async fn pause_ingestion(
     config: &BackupConfig,
     connect: &Connect,
     connectors: &[&str],
@@ -168,7 +171,7 @@ async fn capture_checkpoints(
     Ok(checkpoints)
 }
 
-async fn require_stable_checkpoint(
+async fn require_unchanged_checkpoint(
     connect: &Connect,
     clickhouse: &ClickHouse,
     pipelines: &[Pipeline],
@@ -224,7 +227,6 @@ mod tests {
         assert_eq!(layout.groups.len(), 2);
         assert_eq!(layout.groups[0].pipelines.len(), 1);
         assert_eq!(layout.groups[1].pipelines.len(), 2);
-        assert_eq!(layout.targets().count(), 2);
         assert_eq!(layout.backup_objects().matches(" AS ").count(), 2);
     }
 }

@@ -29,9 +29,9 @@ struct BackupPlan {
     pipelines: Vec<Pipeline>,
 }
 
-struct CreatedArchives {
-    target: BackupReference,
-    target_details: BackupDetails,
+struct UploadedBackup {
+    reference: BackupReference,
+    details: BackupDetails,
 }
 
 pub async fn run(path: &std::path::Path) -> Result<()> {
@@ -85,7 +85,7 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
         _ = interrupt.recv() => Err(anyhow::anyhow!("backup interrupted")),
         _ = terminate.recv() => Err(anyhow::anyhow!("backup terminated")),
     };
-    let resume = resume_all(&connect, &connectors).await;
+    let resume = resume_ingestion(&connect, &connectors).await;
     if let Err(error) = snapshots.cleanup(&clickhouse).await {
         eprintln!("failed to remove ClickHouse snapshot tables: {error:#}");
     }
@@ -112,25 +112,28 @@ async fn create_backup(
     )?;
 
     let checkpoints = snapshots
-        .create(config, connect, clickhouse, &kafka)
+        .capture_immutable_snapshots_during_short_ingestion_pauses(
+            config, connect, clickhouse, &kafka,
+        )
         .await?;
-    kafka.verify(&checkpoints)?;
-    let archives = create_archives(config, clickhouse, plan, snapshots).await?;
+    kafka.require_offsets_replayable(&checkpoints)?;
+    let uploaded =
+        upload_and_verify_immutable_snapshots(config, clickhouse, plan, snapshots).await?;
 
-    let manifest = build_manifest(&archives, checkpoints);
+    let manifest = build_manifest(&uploaded, checkpoints);
     validate_manifest(&manifest)?;
-    kafka.verify(&manifest.connectors)?;
-    commit_manifest(catalog, plan, &manifest).await?;
-    print_output(&archives, &manifest)?;
+    kafka.require_offsets_replayable(&manifest.connectors)?;
+    commit_completed_backup(catalog, plan, &manifest).await?;
+    print_output(&uploaded, &manifest)?;
     Ok(())
 }
 
-async fn create_archives(
+async fn upload_and_verify_immutable_snapshots(
     config: &BackupConfig,
     clickhouse: &ClickHouse,
     plan: &BackupPlan,
     snapshots: &SnapshotLayout,
-) -> Result<CreatedArchives> {
+) -> Result<UploadedBackup> {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let target_path = match plan.kind {
         BackupKind::Full => format!(
@@ -157,11 +160,11 @@ async fn create_archives(
             config.max_backup_bandwidth,
         )
         .await?;
-    let target_details = clickhouse
+    let details = clickhouse
         .backup_details(target_id, &target_destination)
         .await?;
-    Ok(CreatedArchives {
-        target: BackupReference {
+    Ok(UploadedBackup {
+        reference: BackupReference {
             id: target_id,
             name: target_destination,
             kind: plan.kind.clone(),
@@ -172,23 +175,23 @@ async fn create_archives(
                 name: backup.name.clone(),
             }),
         },
-        target_details,
+        details,
     })
 }
 
 fn build_manifest(
-    archives: &CreatedArchives,
+    uploaded: &UploadedBackup,
     connectors: Vec<ConnectorCheckpoint>,
 ) -> BackupManifest {
     BackupManifest {
         created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        backup: archives.target.clone(),
+        backup: uploaded.reference.clone(),
         connectors,
     }
 }
 
 /// Publishes the manifest and chain head atomically; this is the backup's commit point.
-async fn commit_manifest(
+async fn commit_completed_backup(
     catalog: &Catalog,
     plan: &BackupPlan,
     manifest: &BackupManifest,
@@ -203,11 +206,11 @@ async fn commit_manifest(
     Ok(())
 }
 
-fn print_output(archives: &CreatedArchives, manifest: &BackupManifest) -> Result<()> {
+fn print_output(uploaded: &UploadedBackup, manifest: &BackupManifest) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&BackupOutput {
-            details: &archives.target_details,
+            details: &uploaded.details,
             manifest
         })?
     );
@@ -517,7 +520,7 @@ fn backup_destination(value: &str) -> bool {
     clickhouse_identifier(collection) && safe_storage_path(path)
 }
 
-pub(crate) async fn resume_all(connect: &Connect, connectors: &[&str]) -> Result<()> {
+pub(crate) async fn resume_ingestion(connect: &Connect, connectors: &[&str]) -> Result<()> {
     let mut failures = Vec::new();
     for connector in connectors {
         if let Err(error) = connect.resume(connector).await {
