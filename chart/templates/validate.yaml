@@ -1,0 +1,30 @@
+{{- $names := dict -}}
+{{- $topics := dict -}}
+{{- $reserved := list "connector.class" "tasks.max" "topics" "topic2TableMap" "hostname" "port" "ssl" "database" "username" "password" "exactlyOnce" "errors.tolerance" "bufferCount" "consumer.override.isolation.level" "zkPath" "zkDatabase" -}}
+{{- range $pipeline := .Values.pipelines }}
+{{- if hasKey $names $pipeline.name }}
+{{- fail (printf "pipeline names must be unique: %s" $pipeline.name) }}
+{{- end }}
+{{- $_ := set $names $pipeline.name true }}
+{{- if hasKey $topics $pipeline.topic }}
+{{- fail (printf "topic names must be unique across pipelines: %s" $pipeline.topic) }}
+{{- end }}
+{{- $_ := set $topics $pipeline.topic true }}
+{{- range $key, $_ := default dict $pipeline.connectorConfig }}
+{{- if has $key $reserved }}
+{{- fail (printf "pipeline %s cannot override safety-critical connector setting %s" $pipeline.name $key) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.backup.enabled (not .Values.backup.credentialsSecret.name) }}
+{{- fail "backup.credentialsSecret.name is required when backups are enabled" }}
+{{- end }}
+{{- $minimumResumeGrace := mul (len .Values.pipelines) (int .Values.timeouts.connectRequestSeconds) }}
+{{- if le (int .Values.backup.terminationGracePeriodSeconds) (int $minimumResumeGrace) }}
+{{- fail "backup.terminationGracePeriodSeconds must exceed connectRequestSeconds multiplied by the pipeline count" }}
+{{- end }}
+{{- range $segment := splitList "/" (trimSuffix "/" .Values.backup.pathPrefix) }}
+{{- if or (eq $segment "") (eq $segment ".") (eq $segment "..") }}
+{{- fail "backup.pathPrefix must be a relative object path without empty, . or .. segments" }}
+{{- end }}
+{{- end }}

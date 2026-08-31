@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-connect
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: connect
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: connect
+  ports:
+    - name: http
+      port: 8083
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-connect
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: connect
+spec:
+  replicas: {{ .Values.connect.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: connect
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
+        app.kubernetes.io/component: connect
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/connect-configmap.yaml") . | sha256sum }}
+        {{- with .Values.connect.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "durable-clickhouse-sink.fullname" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: configure
+          image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+          imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+          command: ["/bin/bash", "-euc"]
+          args:
+            - |
+              cp /config/connect-distributed.properties /work/connect-distributed.properties
+              {{- if .Values.kafka.existingSecret }}
+              printf '\n' >> /work/connect-distributed.properties
+              cat /kafka/client.properties >> /work/connect-distributed.properties
+              {{- end }}
+          volumeMounts:
+            - name: connect-config
+              mountPath: /config
+              readOnly: true
+            - name: connect-work
+              mountPath: /work
+            {{- if .Values.kafka.existingSecret }}
+            - name: kafka-client
+              mountPath: /kafka
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: connect
+          image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+          imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+          command: ["/bin/connect-distributed.sh", "/etc/durable-clickhouse/connect-distributed.properties"]
+          ports:
+            - name: http
+              containerPort: 8083
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: {{ .Values.connect.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.connect.readinessProbe.failureThreshold }}
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            initialDelaySeconds: {{ .Values.connect.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.connect.livenessProbe.periodSeconds }}
+          resources:
+            {{- toYaml .Values.connect.resources | nindent 18 }}
+          volumeMounts:
+            - name: connect-work
+              mountPath: /etc/durable-clickhouse
+            - name: clickhouse-credentials
+              mountPath: /etc/clickhouse
+              readOnly: true
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: connect-config
+          configMap:
+            name: {{ include "durable-clickhouse-sink.fullname" . }}-connect
+        - name: connect-work
+          emptyDir: {}
+        - name: clickhouse-credentials
+          secret:
+            secretName: {{ .Values.clickhouse.credentialsSecret.name }}
+            items:
+              - key: {{ .Values.clickhouse.credentialsSecret.propertiesKey }}
+                path: clickhouse.properties
+        - {name: tmp, emptyDir: {}}
+        {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 6 }}

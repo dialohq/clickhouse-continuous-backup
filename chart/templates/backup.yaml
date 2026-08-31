@@ -1,0 +1,68 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-backup
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  suspend: {{ .Values.backup.suspend }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ .Values.backup.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "durable-clickhouse-sink.labels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: {{ .Values.backup.terminationGracePeriodSeconds }}
+          securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+          containers:
+            - name: backup
+              image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+              imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+              command: ["/bin/durable-clickhouse-backup", "backup", "/etc/durable-clickhouse/backup.json"]
+              env:
+                - name: BACKUP_RUN_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: CLICKHOUSE_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.credentialsSecret.name }}
+                      key: {{ .Values.backup.credentialsSecret.usernameKey }}
+                - name: CLICKHOUSE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.credentialsSecret.name }}
+                      key: {{ .Values.backup.credentialsSecret.passwordKey }}
+              volumeMounts:
+                - {name: tmp, mountPath: /tmp}
+                - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
+                {{- if .Values.kafka.existingSecret }}
+                - {name: kafka-backup-client, mountPath: /etc/kafka-backup, readOnly: true}
+                {{- end }}
+          volumes:
+            - {name: tmp, emptyDir: {}}
+            - name: runtime-config
+              configMap:
+                name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+            {{- if .Values.kafka.existingSecret }}
+            - name: kafka-backup-client
+              secret:
+                secretName: {{ .Values.kafka.existingSecret }}
+                items:
+                  - key: {{ .Values.backup.kafkaPropertiesKey }}
+                    path: client.properties
+            {{- end }}
+{{- end }}

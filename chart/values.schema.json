@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["kafka", "clickhouse", "timeouts", "pipelines"],
+  "properties": {
+    "stateNamespace": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+      "maxLength": 30
+    },
+    "kafka": {
+      "type": "object",
+      "required": ["bootstrapServers"],
+      "properties": {
+        "bootstrapServers": {"type": "string", "minLength": 1},
+        "existingSecret": {"type": "string"},
+        "propertiesKey": {"type": "string", "minLength": 1},
+        "replicationFactor": {"type": "integer", "minimum": 1},
+        "internalTopicReplicationFactor": {"type": "integer", "minimum": 1}
+      }
+    },
+    "clickhouse": {
+      "type": "object",
+      "required": ["host", "credentialsSecret"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "secure": {"type": "boolean"},
+        "database": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+        "credentialsSecret": {
+          "type": "object",
+          "required": ["name", "propertiesKey"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "propertiesKey": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "pipelines": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "topic", "table"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "maxLength": 40
+          },
+          "topic": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]+$",
+            "maxLength": 249
+          },
+          "table": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+          "database": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+          "retentionMs": {"type": "integer", "minimum": 60000, "default": 7776000000},
+          "partitions": {"type": "integer", "minimum": 1},
+          "valueConverter": {"type": "string", "minLength": 1},
+          "valueConverterSchemasEnable": {"type": "boolean"},
+          "connectorConfig": {"type": "object", "additionalProperties": true}
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "required": [
+        "clickhouseConnectSeconds",
+        "connectConnectSeconds",
+        "connectRequestSeconds",
+        "connectPollSeconds",
+        "kafkaMetadataSeconds",
+        "kafkaCatalogAcquireSeconds",
+        "kafkaCatalogReadSeconds",
+        "kafkaTransactionSeconds",
+        "kafkaMaxPollSeconds",
+        "hookJobSeconds"
+      ],
+      "properties": {
+        "clickhouseConnectSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "connectConnectSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "connectRequestSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "connectPollSeconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "kafkaMetadataSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "kafkaCatalogAcquireSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "kafkaCatalogReadSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "kafkaTransactionSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "kafkaMaxPollSeconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+        "hookJobSeconds": {"type": "integer", "minimum": 1, "maximum": 86400}
+      }
+    },
+    "backup": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "schedule": {"type": "string", "minLength": 1},
+        "suspend": {"type": "boolean"},
+        "namedCollection": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+        "pathPrefix": {"type": "string", "pattern": "^[A-Za-z0-9_./-]+$"},
+        "archiveExtension": {
+          "type": "string",
+          "enum": ["tar.zst", "tar.gz", "tar.xz", "tar.bz2", "tgz", "tzst"]
+        },
+        "maxIncrementalsPerFull": {"type": "integer", "minimum": 0, "maximum": 9999},
+        "maxBandwidthBytesPerSecond": {"type": "integer", "minimum": 0},
+        "pauseTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+        "terminationGracePeriodSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "catalogTopic": {
+          "type": "string",
+          "pattern": "^$|^[A-Za-z0-9._-]+$",
+          "maxLength": 249
+        },
+        "kafkaPropertiesKey": {"type": "string", "minLength": 1},
+        "credentialsSecret": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "usernameKey": {"type": "string", "minLength": 1},
+            "passwordKey": {"type": "string", "minLength": 1}
+          }
+        },
+        "successfulJobsHistoryLimit": {"type": "integer", "minimum": 0},
+        "failedJobsHistoryLimit": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

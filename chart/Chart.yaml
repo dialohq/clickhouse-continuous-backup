@@ -1,0 +1,11 @@
+apiVersion: v2
+name: durable-clickhouse-sink
+description: Durable Kafka-compatible ingestion into ClickHouse with incremental backups
+type: application
+version: 0.1.0
+appVersion: 0.1.0
+home: https://github.com/dialohq/durable-clickhouse-sink
+sources:
+  - https://github.com/dialohq/durable-clickhouse-sink
+annotations:
+  artifacthub.io/license: Apache-2.0

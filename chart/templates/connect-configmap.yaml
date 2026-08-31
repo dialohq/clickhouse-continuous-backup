@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-connect
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+data:
+  connect-distributed.properties: |
+    bootstrap.servers={{ .Values.kafka.bootstrapServers }}
+    group.id={{ include "durable-clickhouse-sink.fullname" . }}-connect
+    config.storage.topic={{ include "durable-clickhouse-sink.fullname" . }}.connect-configs
+    offset.storage.topic={{ include "durable-clickhouse-sink.fullname" . }}.connect-offsets
+    status.storage.topic={{ include "durable-clickhouse-sink.fullname" . }}.connect-status
+    config.storage.replication.factor={{ .Values.kafka.internalTopicReplicationFactor }}
+    offset.storage.replication.factor={{ .Values.kafka.internalTopicReplicationFactor }}
+    status.storage.replication.factor={{ .Values.kafka.internalTopicReplicationFactor }}
+    key.converter=org.apache.kafka.connect.storage.StringConverter
+    value.converter=org.apache.kafka.connect.json.JsonConverter
+    value.converter.schemas.enable=false
+    plugin.path=/plugins
+    rest.port=8083
+    config.providers=file
+    config.providers.file.class=org.apache.kafka.common.config.provider.FileConfigProvider
+    connector.client.config.override.policy=All
+    offset.flush.interval.ms=1000

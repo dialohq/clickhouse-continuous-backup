@@ -26,7 +26,7 @@
       pkgs = import nixpkgs {inherit system;};
       backup = pkgs.callPackage ./nix/backup.nix {};
       images = import ./nix/images.nix {inherit pkgs system backup nix2container;};
-      chartSource = pkgs.callPackage ./nix/chart.nix {};
+      chartSource = ./chart;
       chart = pkgs.runCommand "durable-clickhouse-sink-chart-0.1.0" {nativeBuildInputs = [pkgs.kubernetes-helm];} ''
         mkdir -p $out
         helm package ${chartSource} --destination $out
