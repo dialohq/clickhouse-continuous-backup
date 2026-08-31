@@ -1,9 +1,9 @@
 mod backup;
-mod catalog;
 mod clickhouse;
 mod config;
 mod connect;
 mod kafka;
+mod metadata;
 mod model;
 mod preflight;
 mod snapshot;

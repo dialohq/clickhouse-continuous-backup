@@ -7,9 +7,22 @@ use rdkafka::{
     producer::{FutureProducer, FutureRecord, Producer},
 };
 
-use crate::config::RuntimeTimeouts;
+use crate::{
+    config::RuntimeTimeouts,
+    model::{BackupManifest, ChainHead},
+};
 
-pub struct Catalog {
+const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head";
+
+pub(crate) trait BackupMetadataStorage {
+    /// Acquires exclusive backup ownership and returns the latest committed chain state.
+    async fn acquire_chain_head(&self) -> Result<Option<ChainHead>>;
+
+    /// Makes the immutable manifest and replacement chain state durable as one commit.
+    async fn commit_backup(&self, manifest: &BackupManifest, head: &ChainHead) -> Result<()>;
+}
+
+pub(crate) struct KafkaBackupMetadataStorage {
     producer: FutureProducer,
     consumer: StreamConsumer,
     topic: String,
@@ -19,8 +32,8 @@ pub struct Catalog {
     transaction_timeout: Duration,
 }
 
-impl Catalog {
-    pub fn new(
+impl KafkaBackupMetadataStorage {
+    pub(crate) fn new(
         bootstrap_servers: &str,
         properties: &HashMap<String, String>,
         topic: String,
@@ -29,7 +42,7 @@ impl Catalog {
     ) -> Result<Self> {
         let lock_group = format!("{topic}.backup-lock");
         if lock_group.len() > 255 {
-            bail!("backup catalog topic is too long to derive the lock group")
+            bail!("backup metadata topic is too long to derive the lock group")
         }
         let mut common = ClientConfig::new();
         for (key, value) in properties {
@@ -67,28 +80,28 @@ impl Catalog {
         })
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<String>> {
+    async fn read(&self, key: &str) -> Result<Option<String>> {
         let metadata = self
             .consumer
             .fetch_metadata(Some(&self.topic), self.metadata_timeout)?;
         let [topic] = metadata.topics() else {
-            bail!("Kafka did not return exactly one backup catalog topic")
+            bail!("Kafka did not return exactly one backup metadata topic")
         };
         if let Some(error) = topic.error() {
-            bail!("Kafka backup-catalog metadata failed: {error:?}")
+            bail!("Kafka backup-metadata lookup failed: {error:?}")
         }
         if topic.partitions().len() != 1 {
-            bail!("the backup catalog topic must have exactly one partition")
+            bail!("the Kafka backup metadata topic must have exactly one partition")
         }
         self.consumer.subscribe(&[&self.topic])?;
         let first = tokio::time::timeout(self.acquire_timeout, self.consumer.recv())
             .await
-            .context("timed out acquiring the backup lock")?;
+            .context("timed out acquiring exclusive backup metadata ownership")?;
         let (low, high) = self
             .consumer
             .fetch_watermarks(&self.topic, 0, self.metadata_timeout)?;
         if low < 0 || high < low {
-            bail!("Kafka returned invalid backup-catalog watermarks: {low}..{high}")
+            bail!("Kafka returned invalid backup-metadata watermarks: {low}..{high}")
         }
         let mut value = None;
         match first {
@@ -106,16 +119,13 @@ impl Catalog {
                 }
                 Ok(Err(rdkafka::error::KafkaError::PartitionEOF(_))) => break,
                 Ok(Err(error)) => return Err(error.into()),
-                Err(_) => bail!("timed out reading the backup catalog"),
+                Err(_) => bail!("timed out reading Kafka backup metadata"),
             }
         }
         Ok(value)
     }
 
-    pub async fn publish(&self, records: &[(&str, &str)]) -> Result<()> {
-        if records.is_empty() {
-            bail!("at least one backup catalog record is required")
-        }
+    async fn publish(&self, records: &[(&str, &str)]) -> Result<()> {
         self.producer.init_transactions(self.transaction_timeout)?;
         self.producer.begin_transaction()?;
         for &(key, value) in records {
@@ -133,11 +143,31 @@ impl Catalog {
                 self.producer
                     .abort_transaction(self.transaction_timeout)
                     .ok();
-                return Err(error).context("failed to publish backup catalog record");
+                return Err(error).context("failed to publish Kafka backup metadata");
             }
         }
         self.producer.commit_transaction(self.transaction_timeout)?;
         Ok(())
+    }
+}
+
+impl BackupMetadataStorage for KafkaBackupMetadataStorage {
+    async fn acquire_chain_head(&self) -> Result<Option<ChainHead>> {
+        self.read(CHAIN_HEAD_KEY)
+            .await?
+            .map(|value| serde_json::from_str(&value).context("invalid backup chain head"))
+            .transpose()
+    }
+
+    async fn commit_backup(&self, manifest: &BackupManifest, head: &ChainHead) -> Result<()> {
+        let manifest_key = manifest.backup.id.to_string();
+        let manifest_json = serde_json::to_string(manifest)?;
+        let head_json = serde_json::to_string(head)?;
+        self.publish(&[
+            (&manifest_key, &manifest_json),
+            (CHAIN_HEAD_KEY, &head_json),
+        ])
+        .await
     }
 }
 

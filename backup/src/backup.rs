@@ -5,16 +5,16 @@ use chrono::Utc;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::{
-    catalog::Catalog,
     clickhouse::ClickHouse,
     config::BackupConfig,
     connect::{Connect, validate_offsets},
     kafka::KafkaLog,
+    metadata::{BackupMetadataStorage, KafkaBackupMetadataStorage},
     model::{
-        BackupDependency, BackupKind, BackupManifest, BackupOutput, BackupReference,
-        CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue,
-        KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline, clickhouse_identifier, kafka_name,
-        safe_chain_id, safe_keeper_path, safe_storage_path,
+        BackupDependency, BackupKind, BackupManifest, BackupOutput, BackupReference, ChainHead,
+        ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperCheckpoint,
+        KeeperRow, Pipeline, clickhouse_identifier, kafka_name, safe_chain_id, safe_keeper_path,
+        safe_storage_path,
     },
     snapshot::SnapshotLayout,
 };
@@ -41,18 +41,14 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
         connect.require_running(connector).await?;
     }
 
-    let catalog = Catalog::new(
+    let metadata = KafkaBackupMetadataStorage::new(
         &config.kafka_bootstrap_servers,
         &config.kafka_properties()?,
         config.catalog_topic.clone(),
         &config.run_id,
         &config.timeouts,
     )?;
-    let head = catalog
-        .get(CHAIN_HEAD_KEY)
-        .await?
-        .map(|value| serde_json::from_str::<ChainHead>(&value).context("invalid backup chain head"))
-        .transpose()?;
+    let head = metadata.acquire_chain_head().await?;
     validate_head(head.as_ref(), &config.pipelines)?;
     let plan = plan_backup(
         head.as_ref(),
@@ -71,7 +67,7 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
     let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines);
     snapshots.cleanup(&clickhouse).await?;
 
-    let operation = create_backup(&config, &connect, &clickhouse, &catalog, &plan, &snapshots);
+    let operation = create_backup(&config, &connect, &clickhouse, &metadata, &plan, &snapshots);
     tokio::pin!(operation);
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -96,7 +92,7 @@ async fn create_backup(
     config: &BackupConfig,
     connect: &Connect,
     clickhouse: &ClickHouse,
-    catalog: &Catalog,
+    metadata: &impl BackupMetadataStorage,
     plan: &BackupPlan,
     snapshots: &SnapshotLayout,
 ) -> Result<()> {
@@ -171,15 +167,7 @@ async fn create_backup(
         incrementals: plan.position,
         pipelines: plan.pipelines.clone(),
     };
-    let manifest_json = serde_json::to_string(&manifest)?;
-    let head_value = serde_json::to_string(&head)?;
-    let manifest_key = manifest.backup.id.to_string();
-    catalog
-        .publish(&[
-            (&manifest_key, &manifest_json),
-            (CHAIN_HEAD_KEY, &head_value),
-        ])
-        .await?;
+    metadata.commit_backup(&manifest, &head).await?;
 
     println!(
         "{}",

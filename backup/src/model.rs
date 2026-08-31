@@ -2,8 +2,6 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head";
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Pipeline {
