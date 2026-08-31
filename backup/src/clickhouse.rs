@@ -77,7 +77,7 @@ impl ClickHouse {
         Ok(body)
     }
 
-    pub async fn create_backup(
+    pub async fn upload_backup(
         &self,
         objects: &str,
         destination: &str,
@@ -114,7 +114,11 @@ impl ClickHouse {
         ))
     }
 
-    pub async fn backup_details(&self, id: uuid::Uuid, destination: &str) -> Result<BackupDetails> {
+    pub async fn require_backup_created(
+        &self,
+        id: uuid::Uuid,
+        destination: &str,
+    ) -> Result<BackupDetails> {
         let rows: Vec<BackupDetails> = self
             .json_each_row(&format!(
                 "SELECT id, name, status, num_files, uncompressed_size, compressed_size FROM system.backups WHERE id = '{id}' FORMAT JSONEachRow"

@@ -11,7 +11,7 @@ use crate::{
     connect::{Connect, validate_offsets},
     kafka::KafkaLog,
     model::{
-        BackupDependency, BackupDetails, BackupKind, BackupManifest, BackupOutput, BackupReference,
+        BackupDependency, BackupKind, BackupManifest, BackupOutput, BackupReference,
         CHAIN_HEAD_KEY, ChainHead, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue,
         KafkaPartition, KeeperCheckpoint, KeeperRow, Pipeline, clickhouse_identifier, kafka_name,
         safe_chain_id, safe_keeper_path, safe_storage_path,
@@ -27,11 +27,6 @@ struct BackupPlan {
     chain_base: Option<BackupReference>,
     generation: u64,
     pipelines: Vec<Pipeline>,
-}
-
-struct UploadedBackup {
-    reference: BackupReference,
-    details: BackupDetails,
 }
 
 pub async fn run(path: &std::path::Path) -> Result<()> {
@@ -117,25 +112,9 @@ async fn create_backup(
         )
         .await?;
     kafka.require_offsets_replayable(&checkpoints)?;
-    let uploaded =
-        upload_and_verify_immutable_snapshots(config, clickhouse, plan, snapshots).await?;
 
-    let manifest = build_manifest(&uploaded, checkpoints);
-    validate_manifest(&manifest)?;
-    kafka.require_offsets_replayable(&manifest.connectors)?;
-    commit_completed_backup(catalog, plan, &manifest).await?;
-    print_output(&uploaded, &manifest)?;
-    Ok(())
-}
-
-async fn upload_and_verify_immutable_snapshots(
-    config: &BackupConfig,
-    clickhouse: &ClickHouse,
-    plan: &BackupPlan,
-    snapshots: &SnapshotLayout,
-) -> Result<UploadedBackup> {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let target_path = match plan.kind {
+    let archive_path = match plan.kind {
         BackupKind::Full => format!(
             "{}/chains/{}/base-{}-{}.{}",
             config.path_prefix, plan.chain_id, stamp, config.run_id, config.archive_extension
@@ -150,23 +129,24 @@ async fn upload_and_verify_immutable_snapshots(
             config.archive_extension
         ),
     };
-    let target_destination = format!("S3({}, '{}')", config.named_collection, target_path);
-    let target_objects = snapshots.backup_objects();
-    let (target_id, _) = clickhouse
-        .create_backup(
-            &target_objects,
-            &target_destination,
+    let destination = format!("S3({}, '{}')", config.named_collection, archive_path);
+    let (archive_id, _) = clickhouse
+        .upload_backup(
+            &snapshots.backup_objects(),
+            &destination,
             plan.base.as_ref().map(|backup| backup.name.as_str()),
             config.max_backup_bandwidth,
         )
         .await?;
     let details = clickhouse
-        .backup_details(target_id, &target_destination)
+        .require_backup_created(archive_id, &destination)
         .await?;
-    Ok(UploadedBackup {
-        reference: BackupReference {
-            id: target_id,
-            name: target_destination,
+
+    let manifest = BackupManifest {
+        created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        backup: BackupReference {
+            id: archive_id,
+            name: destination,
             kind: plan.kind.clone(),
             chain_id: plan.chain_id.clone(),
             position: plan.position,
@@ -175,43 +155,37 @@ async fn upload_and_verify_immutable_snapshots(
                 name: backup.name.clone(),
             }),
         },
-        details,
-    })
-}
+        connectors: checkpoints,
+    };
+    validate_manifest(&manifest)?;
+    kafka.require_offsets_replayable(&manifest.connectors)?;
 
-fn build_manifest(
-    uploaded: &UploadedBackup,
-    connectors: Vec<ConnectorCheckpoint>,
-) -> BackupManifest {
-    BackupManifest {
-        created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        backup: uploaded.reference.clone(),
-        connectors,
-    }
-}
-
-/// Publishes the manifest and chain head atomically; this is the backup's commit point.
-async fn commit_completed_backup(
-    catalog: &Catalog,
-    plan: &BackupPlan,
-    manifest: &BackupManifest,
-) -> Result<()> {
-    let head = next_head(plan, manifest.backup.clone());
+    let head = ChainHead {
+        generation: plan.generation,
+        chain_id: plan.chain_id.clone(),
+        base: plan
+            .chain_base
+            .clone()
+            .unwrap_or_else(|| manifest.backup.clone()),
+        latest: manifest.backup.clone(),
+        incrementals: plan.position,
+        pipelines: plan.pipelines.clone(),
+    };
     let manifest_json = serde_json::to_string(&manifest)?;
     let head_value = serde_json::to_string(&head)?;
-    let backup_id = manifest.backup.id.to_string();
+    let manifest_key = manifest.backup.id.to_string();
     catalog
-        .publish(&[(&backup_id, &manifest_json), (CHAIN_HEAD_KEY, &head_value)])
+        .publish(&[
+            (&manifest_key, &manifest_json),
+            (CHAIN_HEAD_KEY, &head_value),
+        ])
         .await?;
-    Ok(())
-}
 
-fn print_output(uploaded: &UploadedBackup, manifest: &BackupManifest) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string(&BackupOutput {
-            details: &uploaded.details,
-            manifest
+            details: &details,
+            manifest: &manifest,
         })?
     );
     Ok(())
@@ -258,18 +232,6 @@ fn plan_backup(
             generation: head.map_or(1, |head| head.generation + 1),
             pipelines: pipelines.to_vec(),
         },
-    }
-}
-
-fn next_head(plan: &BackupPlan, backup: BackupReference) -> ChainHead {
-    let base = plan.chain_base.clone().unwrap_or_else(|| backup.clone());
-    ChainHead {
-        generation: plan.generation,
-        chain_id: plan.chain_id.clone(),
-        base,
-        latest: backup,
-        incrementals: plan.position,
-        pipelines: plan.pipelines.clone(),
     }
 }
 
