@@ -158,12 +158,12 @@ pub struct BackupReference {
     pub chain_id: String,
     pub position: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub base: Option<BackupDependency>,
+    pub parent: Option<BackupParent>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BackupDependency {
+pub struct BackupParent {
     pub id: Uuid,
     pub name: String,
 }
@@ -178,12 +178,12 @@ pub struct BackupManifest {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ChainHead {
+pub struct BackupChainState {
     pub generation: u64,
     pub chain_id: String,
-    pub base: BackupReference,
-    pub latest: BackupReference,
-    pub incrementals: u32,
+    pub root: BackupReference,
+    pub tip: BackupReference,
+    pub incremental_count: u32,
     pub pipelines: Vec<Pipeline>,
 }
 

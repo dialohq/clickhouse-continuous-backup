@@ -9,9 +9,9 @@ use crate::{
     config::BackupConfig,
     connect::{Connect, validate_offsets},
     kafka::KafkaLog,
-    metadata::{BackupMetadataStorage, KafkaBackupMetadataStorage},
+    metadata::{BackupMetadataLease, BackupMetadataStorage, KafkaBackupMetadataStorage},
     model::{
-        BackupDependency, BackupKind, BackupManifest, BackupOutput, BackupReference, ChainHead,
+        BackupChainState, BackupKind, BackupManifest, BackupOutput, BackupParent, BackupReference,
         ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperCheckpoint,
         KeeperRow, Pipeline, clickhouse_identifier, kafka_name, safe_chain_id, safe_keeper_path,
         safe_storage_path,
@@ -23,8 +23,8 @@ struct BackupPlan {
     kind: BackupKind,
     chain_id: String,
     position: u32,
-    base: Option<BackupReference>,
-    chain_base: Option<BackupReference>,
+    parent: Option<BackupReference>,
+    root: Option<BackupReference>,
     generation: u64,
     pipelines: Vec<Pipeline>,
 }
@@ -48,10 +48,10 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
         &config.run_id,
         &config.timeouts,
     )?;
-    let head = metadata.acquire_chain_head().await?;
-    validate_head(head.as_ref(), &config.pipelines)?;
+    let lease = metadata.acquire().await?;
+    validate_chain_state(lease.chain_state(), &config.pipelines)?;
     let plan = plan_backup(
-        head.as_ref(),
+        lease.chain_state(),
         config.max_incrementals_per_full,
         &config.run_id,
         &config.pipelines,
@@ -67,7 +67,7 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
     let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines);
     snapshots.cleanup(&clickhouse).await?;
 
-    let operation = create_backup(&config, &connect, &clickhouse, &metadata, &plan, &snapshots);
+    let operation = create_backup(&config, &connect, &clickhouse, lease, &plan, &snapshots);
     tokio::pin!(operation);
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -92,7 +92,7 @@ async fn create_backup(
     config: &BackupConfig,
     connect: &Connect,
     clickhouse: &ClickHouse,
-    metadata: &impl BackupMetadataStorage,
+    metadata: impl BackupMetadataLease,
     plan: &BackupPlan,
     snapshots: &SnapshotLayout,
 ) -> Result<()> {
@@ -130,7 +130,7 @@ async fn create_backup(
         .upload_backup(
             &snapshots.backup_objects(),
             &destination,
-            plan.base.as_ref().map(|backup| backup.name.as_str()),
+            plan.parent.as_ref().map(|backup| backup.name.as_str()),
             config.max_backup_bandwidth,
         )
         .await?;
@@ -146,7 +146,7 @@ async fn create_backup(
             kind: plan.kind.clone(),
             chain_id: plan.chain_id.clone(),
             position: plan.position,
-            base: plan.base.as_ref().map(|backup| BackupDependency {
+            parent: plan.parent.as_ref().map(|backup| BackupParent {
                 id: backup.id,
                 name: backup.name.clone(),
             }),
@@ -156,18 +156,15 @@ async fn create_backup(
     validate_manifest(&manifest)?;
     kafka.require_offsets_replayable(&manifest.connectors)?;
 
-    let head = ChainHead {
+    let chain_state = BackupChainState {
         generation: plan.generation,
         chain_id: plan.chain_id.clone(),
-        base: plan
-            .chain_base
-            .clone()
-            .unwrap_or_else(|| manifest.backup.clone()),
-        latest: manifest.backup.clone(),
-        incrementals: plan.position,
+        root: plan.root.clone().unwrap_or_else(|| manifest.backup.clone()),
+        tip: manifest.backup.clone(),
+        incremental_count: plan.position,
         pipelines: plan.pipelines.clone(),
     };
-    metadata.commit_backup(&manifest, &head).await?;
+    metadata.commit(&manifest, &chain_state).await?;
 
     println!(
         "{}",
@@ -196,28 +193,28 @@ pub(crate) fn require_unchanged_keeper(
 }
 
 fn plan_backup(
-    head: Option<&ChainHead>,
+    chain_state: Option<&BackupChainState>,
     max_incrementals: u32,
     run_id: &str,
     pipelines: &[Pipeline],
 ) -> BackupPlan {
-    match head.filter(|head| head.incrementals < max_incrementals) {
-        Some(head) => BackupPlan {
+    match chain_state.filter(|state| state.incremental_count < max_incrementals) {
+        Some(state) => BackupPlan {
             kind: BackupKind::Incremental,
-            chain_id: head.chain_id.clone(),
-            position: head.incrementals + 1,
-            base: Some(head.latest.clone()),
-            chain_base: Some(head.base.clone()),
-            generation: head.generation + 1,
+            chain_id: state.chain_id.clone(),
+            position: state.incremental_count + 1,
+            parent: Some(state.tip.clone()),
+            root: Some(state.root.clone()),
+            generation: state.generation + 1,
             pipelines: pipelines.to_vec(),
         },
         None => BackupPlan {
             kind: BackupKind::Full,
             chain_id: run_id.to_owned(),
             position: 0,
-            base: None,
-            chain_base: None,
-            generation: head.map_or(1, |head| head.generation + 1),
+            parent: None,
+            root: None,
+            generation: chain_state.map_or(1, |state| state.generation + 1),
             pipelines: pipelines.to_vec(),
         },
     }
@@ -322,38 +319,38 @@ pub(crate) fn checkpoint(
     })
 }
 
-fn validate_head(head: Option<&ChainHead>, pipelines: &[Pipeline]) -> Result<()> {
-    let Some(head) = head else { return Ok(()) };
-    let valid_latest = if head.incrementals == 0 {
-        head.latest.kind == BackupKind::Full
-            && head.latest.base.is_none()
-            && head.latest == head.base
+fn validate_chain_state(state: Option<&BackupChainState>, pipelines: &[Pipeline]) -> Result<()> {
+    let Some(state) = state else { return Ok(()) };
+    let valid_tip = if state.incremental_count == 0 {
+        state.tip.kind == BackupKind::Full && state.tip.parent.is_none() && state.tip == state.root
     } else {
-        head.latest.kind == BackupKind::Incremental
-            && head.latest.base.as_ref().is_some_and(|dependency| {
-                dependency.id != head.latest.id && dependency.name != head.latest.name
-            })
+        state.tip.kind == BackupKind::Incremental
+            && state
+                .tip
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.id != state.tip.id && parent.name != state.tip.name)
     };
-    if head.generation == 0
-        || head.generation == u64::MAX
-        || head.pipelines != pipelines
-        || !safe_chain_id(&head.chain_id)
-        || head.base.kind != BackupKind::Full
-        || !backup_destination(&head.base.name)
-        || head.base.chain_id != head.chain_id
-        || head.base.position != 0
-        || head.base.base.is_some()
-        || !backup_destination(&head.latest.name)
-        || head.latest.chain_id != head.chain_id
-        || head.latest.position != head.incrementals
-        || head
-            .latest
-            .base
+    if state.generation == 0
+        || state.generation == u64::MAX
+        || state.pipelines != pipelines
+        || !safe_chain_id(&state.chain_id)
+        || state.root.kind != BackupKind::Full
+        || !backup_destination(&state.root.name)
+        || state.root.chain_id != state.chain_id
+        || state.root.position != 0
+        || state.root.parent.is_some()
+        || !backup_destination(&state.tip.name)
+        || state.tip.chain_id != state.chain_id
+        || state.tip.position != state.incremental_count
+        || state
+            .tip
+            .parent
             .as_ref()
-            .is_some_and(|base| !backup_destination(&base.name))
-        || !valid_latest
+            .is_some_and(|parent| !backup_destination(&parent.name))
+        || !valid_tip
     {
-        bail!("invalid backup chain head")
+        bail!("invalid backup chain state")
     }
     Ok(())
 }
@@ -361,16 +358,16 @@ fn validate_head(head: Option<&ChainHead>, pipelines: &[Pipeline]) -> Result<()>
 pub fn validate_manifest(point: &BackupManifest) -> Result<()> {
     let backup = &point.backup;
     let valid_backup = match backup.kind {
-        BackupKind::Full => backup.position == 0 && backup.base.is_none(),
-        BackupKind::Incremental => backup.position > 0 && backup.base.is_some(),
+        BackupKind::Full => backup.position == 0 && backup.parent.is_none(),
+        BackupKind::Incremental => backup.position > 0 && backup.parent.is_some(),
     };
     if point.connectors.is_empty()
         || !safe_chain_id(&backup.chain_id)
         || !backup_destination(&backup.name)
         || backup
-            .base
+            .parent
             .as_ref()
-            .is_some_and(|base| !backup_destination(&base.name))
+            .is_some_and(|parent| !backup_destination(&parent.name))
         || !valid_backup
     {
         bail!("invalid backup manifest")
@@ -502,34 +499,34 @@ mod tests {
             kind,
             chain_id: "chain".to_owned(),
             position,
-            base: None,
+            parent: None,
         }
     }
 
-    fn head(incrementals: u32) -> ChainHead {
-        let mut latest = reference(
-            if incrementals == 0 {
+    fn chain_state(incremental_count: u32) -> BackupChainState {
+        let mut tip = reference(
+            if incremental_count == 0 {
                 BackupKind::Full
             } else {
                 BackupKind::Incremental
             },
-            incrementals,
+            incremental_count,
         );
-        if incrementals > 0 {
-            latest.base = Some(BackupDependency {
-                id: Uuid::from_u128(incrementals as u128),
+        if incremental_count > 0 {
+            tip.parent = Some(BackupParent {
+                id: Uuid::from_u128(incremental_count as u128),
                 name: format!(
                     "S3(backups, 'root/chains/chain/backup-{}.tar.zst')",
-                    incrementals - 1
+                    incremental_count - 1
                 ),
             });
         }
-        ChainHead {
-            generation: incrementals as u64 + 1,
+        BackupChainState {
+            generation: incremental_count as u64 + 1,
             chain_id: "chain".to_owned(),
-            base: reference(BackupKind::Full, 0),
-            latest,
-            incrementals,
+            root: reference(BackupKind::Full, 0),
+            tip,
+            incremental_count,
             pipelines: vec![pipeline()],
         }
     }
@@ -577,12 +574,12 @@ mod tests {
 
     #[test]
     fn continues_incremental_chain_until_limit() {
-        let chain = head(1);
+        let chain = chain_state(1);
         let plan = plan_backup(Some(&chain), 3, "run", &[pipeline()]);
         assert_eq!(plan.kind, BackupKind::Incremental);
         assert_eq!(plan.position, 2);
         assert_eq!(
-            plan.base.unwrap().name,
+            plan.parent.unwrap().name,
             "S3(backups, 'root/chains/chain/backup-1.tar.zst')"
         );
     }
@@ -590,11 +587,11 @@ mod tests {
     #[test]
     fn starts_new_full_at_limit_or_when_disabled() {
         assert_eq!(
-            plan_backup(Some(&head(3)), 3, "new", &[pipeline()]).kind,
+            plan_backup(Some(&chain_state(3)), 3, "new", &[pipeline()]).kind,
             BackupKind::Full
         );
         assert_eq!(
-            plan_backup(Some(&head(0)), 0, "new", &[pipeline()]).kind,
+            plan_backup(Some(&chain_state(0)), 0, "new", &[pipeline()]).kind,
             BackupKind::Full
         );
     }
@@ -738,32 +735,32 @@ mod tests {
     }
 
     #[test]
-    fn validates_chain_head_structure() {
-        assert!(validate_head(Some(&head(2)), &[pipeline()]).is_ok());
-        let mut invalid = head(2);
-        invalid.latest.position = 1;
-        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
-        invalid = head(2);
-        invalid.base.kind = BackupKind::Incremental;
-        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
-        invalid = head(2);
+    fn validates_chain_state_structure() {
+        assert!(validate_chain_state(Some(&chain_state(2)), &[pipeline()]).is_ok());
+        let mut invalid = chain_state(2);
+        invalid.tip.position = 1;
+        assert!(validate_chain_state(Some(&invalid), &[pipeline()]).is_err());
+        invalid = chain_state(2);
+        invalid.root.kind = BackupKind::Incremental;
+        assert!(validate_chain_state(Some(&invalid), &[pipeline()]).is_err());
+        invalid = chain_state(2);
         invalid.chain_id.clear();
-        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
-        invalid = head(2);
-        invalid.latest.name = "S3(backups, 'root/../escape.tar.zst')".to_owned();
-        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
-        invalid = head(2);
-        invalid.latest.base = Some(BackupDependency {
-            id: invalid.latest.id,
-            name: invalid.latest.name.clone(),
+        assert!(validate_chain_state(Some(&invalid), &[pipeline()]).is_err());
+        invalid = chain_state(2);
+        invalid.tip.name = "S3(backups, 'root/../escape.tar.zst')".to_owned();
+        assert!(validate_chain_state(Some(&invalid), &[pipeline()]).is_err());
+        invalid = chain_state(2);
+        invalid.tip.parent = Some(BackupParent {
+            id: invalid.tip.id,
+            name: invalid.tip.name.clone(),
         });
-        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
-        invalid = head(2);
+        assert!(validate_chain_state(Some(&invalid), &[pipeline()]).is_err());
+        invalid = chain_state(2);
         invalid.generation = u64::MAX;
-        assert!(validate_head(Some(&invalid), &[pipeline()]).is_err());
+        assert!(validate_chain_state(Some(&invalid), &[pipeline()]).is_err());
         let mut different = pipeline();
         different.topic = "other".to_owned();
-        assert!(validate_head(Some(&head(2)), &[different]).is_err());
+        assert!(validate_chain_state(Some(&chain_state(2)), &[different]).is_err());
     }
 
     fn manifest() -> BackupManifest {

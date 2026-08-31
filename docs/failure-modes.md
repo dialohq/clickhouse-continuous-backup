@@ -13,7 +13,7 @@ longer safe. A failed check does not authorize an operator to bypass it.
 | Kafka Connect reports an offset ahead of ClickHouse KeeperMap | Backup fails; KeeperMap remains authoritative. |
 | Input topic is missing, has a different partition count, was truncated past a saved offset, or has a high watermark below it | Backup checks before and after the archive work and fails. |
 | Backup catalog topic has more than one partition | The backup lock and catalog refuse to operate. The managed-topic Job also verifies its partition count. |
-| Another release or pipeline topology reuses the backup catalog | The chain head scope differs and backup fails before pausing connectors. |
+| Another release or pipeline topology reuses the backup catalog | The chain-state scope differs and backup fails before pausing connectors. |
 | Target-data backup succeeds but validation or catalog publication fails | No backup manifest is committed. Completed S3 objects are unreferenced orphans. Ingestion is already running. |
 | Object-store or ClickHouse backup error | `system.backups` must report the exact ID, destination, sizes, and `BACKUP_CREATED`; otherwise no manifest is committed. |
 | Incremental chain limit is reached | The next point starts a new full chain. |

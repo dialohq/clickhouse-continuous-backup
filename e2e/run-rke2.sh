@@ -265,7 +265,7 @@ base_output=$(wait_backup e2e-backup-base)
 base=$(jq -r '.name' <<<"$base_output")
 base_id=$(jq -r '.manifest.backup.id' <<<"$base_output")
 base_manifest=$(jq --compact-output '.manifest' <<<"$base_output")
-jq --exit-status '.backup.kind == "full" and .backup.position == 0 and (.backup | has("base") | not)' <<<"$base_manifest" >/dev/null
+jq --exit-status '.backup.kind == "full" and .backup.position == 0 and (.backup | has("parent") | not)' <<<"$base_manifest" >/dev/null
 
 clickhouse "RESTORE TABLE durable_e2e.records AS durable_e2e.base_snapshot_probe FROM $base"
 [[ $(clickhouse 'SELECT count() FROM durable_e2e.base_snapshot_probe') == 1100 ]]
@@ -277,7 +277,7 @@ incremental_one_id=$(jq -r '.manifest.backup.id' <<<"$incremental_one_output")
 jq --exit-status --arg id "$base_id" --arg name "$base" '
   .manifest.backup.kind == "incremental" and
   .manifest.backup.position == 1 and
-  .manifest.backup.base == {id: $id, name: $name}
+  .manifest.backup.parent == {id: $id, name: $name}
 ' <<<"$incremental_one_output" >/dev/null
 
 start_producer incremental-two-records 1151 1200
@@ -290,7 +290,7 @@ manifest=$(jq --compact-output '.manifest' <<<"$incremental_two_output")
 jq --exit-status --arg id "$incremental_one_id" --arg name "$incremental_one" '
   .backup.kind == "incremental" and
   .backup.position == 2 and
-  .backup.base == {id: $id, name: $name} and
+  .backup.parent == {id: $id, name: $name} and
   ([.connectors[].keeper.rows[].state] | all(. == "AFTER_PROCESSING")) and
   ([.connectors[] | .offsets as $exact | .observed_connect_offsets[] |
     . as $observed | ($exact[] | select(.partition == $observed.partition) | .offset.kafka_offset) >= $observed.offset.kafka_offset] | all)

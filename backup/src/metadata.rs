@@ -9,17 +9,23 @@ use rdkafka::{
 
 use crate::{
     config::RuntimeTimeouts,
-    model::{BackupManifest, ChainHead},
+    model::{BackupChainState, BackupManifest},
 };
 
-const CHAIN_HEAD_KEY: &str = "__durable_clickhouse_sink_chain_head";
+const CHAIN_STATE_KEY: &str = "__durable_clickhouse_sink_chain_state";
 
 pub(crate) trait BackupMetadataStorage {
-    /// Acquires exclusive backup ownership and returns the latest committed chain state.
-    async fn acquire_chain_head(&self) -> Result<Option<ChainHead>>;
+    type Lease<'a>: BackupMetadataLease
+    where
+        Self: 'a;
 
-    /// Makes the immutable manifest and replacement chain state durable as one commit.
-    async fn commit_backup(&self, manifest: &BackupManifest, head: &ChainHead) -> Result<()>;
+    async fn acquire(&self) -> Result<Self::Lease<'_>>;
+}
+
+pub(crate) trait BackupMetadataLease {
+    fn chain_state(&self) -> Option<&BackupChainState>;
+
+    async fn commit(self, manifest: &BackupManifest, chain_state: &BackupChainState) -> Result<()>;
 }
 
 pub(crate) trait BackupMetadataReader {
@@ -155,23 +161,42 @@ impl KafkaBackupMetadataStorage {
     }
 }
 
+pub(crate) struct KafkaBackupMetadataLease<'a> {
+    storage: &'a KafkaBackupMetadataStorage,
+    chain_state: Option<BackupChainState>,
+}
+
 impl BackupMetadataStorage for KafkaBackupMetadataStorage {
-    async fn acquire_chain_head(&self) -> Result<Option<ChainHead>> {
-        self.read(CHAIN_HEAD_KEY)
+    type Lease<'a> = KafkaBackupMetadataLease<'a>;
+
+    async fn acquire(&self) -> Result<Self::Lease<'_>> {
+        let chain_state = self
+            .read(CHAIN_STATE_KEY)
             .await?
-            .map(|value| serde_json::from_str(&value).context("invalid backup chain head"))
-            .transpose()
+            .map(|value| serde_json::from_str(&value).context("invalid backup chain state"))
+            .transpose()?;
+        Ok(KafkaBackupMetadataLease {
+            storage: self,
+            chain_state,
+        })
+    }
+}
+
+impl BackupMetadataLease for KafkaBackupMetadataLease<'_> {
+    fn chain_state(&self) -> Option<&BackupChainState> {
+        self.chain_state.as_ref()
     }
 
-    async fn commit_backup(&self, manifest: &BackupManifest, head: &ChainHead) -> Result<()> {
+    async fn commit(self, manifest: &BackupManifest, chain_state: &BackupChainState) -> Result<()> {
         let manifest_key = manifest.backup.id.to_string();
         let manifest_json = serde_json::to_string(manifest)?;
-        let head_json = serde_json::to_string(head)?;
-        self.publish(&[
-            (&manifest_key, &manifest_json),
-            (CHAIN_HEAD_KEY, &head_json),
-        ])
-        .await
+        let chain_state_json = serde_json::to_string(chain_state)?;
+        self.storage
+            .publish(&[
+                (&manifest_key, &manifest_json),
+                (CHAIN_STATE_KEY, &chain_state_json),
+            ])
+            .await
     }
 }
 
