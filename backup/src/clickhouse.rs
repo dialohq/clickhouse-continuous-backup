@@ -68,12 +68,12 @@ impl ClickHouse {
         &self,
         objects: &str,
         destination: &str,
-        base: Option<&str>,
+        parent: Option<&str>,
         max_bandwidth: u64,
     ) -> Result<(uuid::Uuid, String)> {
         let mut settings = Vec::new();
-        if let Some(base) = base {
-            settings.push(format!("base_backup = {base}"));
+        if let Some(parent) = parent {
+            settings.push(format!("base_backup = {parent}"));
         }
         if max_bandwidth > 0 {
             settings.push(format!("max_backup_bandwidth = {max_bandwidth}"));

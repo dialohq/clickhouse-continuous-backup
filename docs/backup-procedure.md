@@ -22,7 +22,7 @@ across tables.
 1. Load configuration, require every managed connector and task to be
    `RUNNING`, and validate the target and KeeperMap engines.
 2. Join the backup catalog's single-partition consumer group. Holding its only
-   partition serializes backup Jobs. Read and validate the current chain head.
+   partition serializes backup Jobs. Read and validate the current chain state.
 3. Choose either a new full backup or the next incremental in the current chain.
 4. Build deterministic physical-table snapshot groups. For each group:
 
@@ -60,7 +60,7 @@ across tables.
    offsets, and the target archive identity.
 9. Repeat the Kafka partition and retention checks immediately before commit.
 10. In one Kafka transaction, write the manifest keyed by the target backup ID
-    and replace the chain-head record. This is the only success boundary.
+    and replace the chain-state record. This is the only success boundary.
 11. Emit the committed manifest. The Job finalizer removes the temporary
     ClickHouse clones.
 

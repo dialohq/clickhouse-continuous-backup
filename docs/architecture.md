@@ -36,7 +36,7 @@ state. Archive creation does not depend on Kafka record keys or serialization.
 The initial `KafkaBackupMetadataStorage` implementation uses the configured
 single-partition compacted topic. Its consumer-group assignment provides
 exclusive backup ownership, and one Kafka transaction commits the UUID-keyed
-manifest and chain head. The reserved chain-head key is private to this
+manifest and chain state. The reserved chain-state key is private to this
 implementation.
 
 Other implementations may keep manifests in S3 and expose them through
