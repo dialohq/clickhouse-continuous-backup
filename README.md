@@ -24,16 +24,18 @@ state at the Kafka-to-ClickHouse boundary. Target tables can remain ordinary
 
 ## Build and install
 
-The chart, image, validation manifests, and E2E environment are defined with
-Nix. Nixidy renders the chart during validation.
+The Helm chart is checked in under `chart/`. Nix packages the chart and image,
+defines the E2E environment, and uses Nixidy to render the chart during
+validation.
 
 ```bash
-nix build .#chart
-helm upgrade --install durable result/durable-clickhouse-sink-*.tgz \
+helm upgrade --install durable ./chart \
   --namespace durable-clickhouse-sink \
   --create-namespace \
   --values values.yaml
 ```
+
+`nix build .#chart` remains available when a packaged chart archive is needed.
 
 Minimal values:
 

@@ -26,7 +26,7 @@
       pkgs = import nixpkgs {inherit system;};
       backup = pkgs.callPackage ./nix/backup.nix {};
       images = import ./nix/images.nix {inherit pkgs system backup nix2container;};
-      chartSource = pkgs.callPackage ./nix/chart.nix {inherit backup;};
+      chartSource = ./chart;
       chart = pkgs.runCommand "durable-clickhouse-sink-chart-0.1.0" {nativeBuildInputs = [pkgs.kubernetes-helm];} ''
         mkdir -p $out
         helm package ${chartSource} --destination $out
@@ -108,7 +108,7 @@
         touch $out
       '';
       chart = pkgs.runCommand "check-chart" {
-        nativeBuildInputs = [pkgs.kubernetes-helm];
+        nativeBuildInputs = [pkgs.diffutils pkgs.kubernetes-helm];
       } ''
         chart_args=(
           --set-string kafka.bootstrapServers=kafka.example:9092
@@ -182,6 +182,8 @@
         grep -F 'secretName: clickhouse-recovery-credentials' rendered.yaml >/dev/null
         grep -F 'backupID:' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
         grep -F 'rule: self == oldSelf' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
+        ${packages.backup}/bin/durable-clickhouse-backup print-recovery-crd > generated-recovery-crd.yaml
+        diff -u ${packages.chartSource}/crds/table-recovery.yaml generated-recovery-crd.yaml
         touch $out
       '';
     });

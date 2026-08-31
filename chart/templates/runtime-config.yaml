@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+data:
+  target.json: |
+    {
+      "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
+      "clickhousePropertiesFile": "/etc/clickhouse/clickhouse.properties",
+      "pipelines": {{ include "durable-clickhouse-sink.backupPipelines" . }},
+      "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
+    }
+  backup.json: |
+    {
+      "connectUrl": "http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083",
+      "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
+      "namedCollection": {{ .Values.backup.namedCollection | quote }},
+      "pathPrefix": {{ trimSuffix "/" .Values.backup.pathPrefix | quote }},
+      "archiveExtension": {{ .Values.backup.archiveExtension | quote }},
+      "pauseTimeoutSeconds": {{ .Values.backup.pauseTimeoutSeconds }},
+      "kafkaBootstrapServers": {{ .Values.kafka.bootstrapServers | quote }},
+      "kafkaPropertiesFile": {{ ternary (quote "/etc/kafka-backup/client.properties") "null" (not (empty .Values.kafka.existingSecret)) }},
+      "catalogTopic": {{ include "durable-clickhouse-sink.catalogTopic" . | quote }},
+      "maxIncrementalsPerFull": {{ .Values.backup.maxIncrementalsPerFull }},
+      "maxBackupBandwidth": {{ .Values.backup.maxBandwidthBytesPerSecond }},
+      "pipelines": {{ include "durable-clickhouse-sink.backupPipelines" . }},
+      "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
+    }
+  recovery.json: |
+    {
+      "connectUrl": "http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083",
+      "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
+      "clickhousePropertiesFile": "/etc/clickhouse-recovery/clickhouse.properties",
+      "clickhouseConnectorHost": {{ .Values.clickhouse.host | quote }},
+      "clickhouseConnectorPort": {{ .Values.clickhouse.port }},
+      "clickhouseConnectorSecure": {{ .Values.clickhouse.secure }},
+      "kafkaBootstrapServers": {{ .Values.kafka.bootstrapServers | quote }},
+      "kafkaPropertiesFile": {{ ternary (quote "/etc/kafka-recovery/client.properties") "null" (not (empty .Values.kafka.existingSecret)) }},
+      "catalogTopic": {{ include "durable-clickhouse-sink.catalogTopic" . | quote }},
+      "replayTopicReplicationFactor": {{ .Values.recovery.replayTopicReplicationFactor }},
+      "replayTopicRetentionMs": {{ int64 .Values.recovery.replayTopicRetentionMs }},
+      "replayBatchRecords": {{ .Values.recovery.replayBatchRecords }},
+      "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
+    }

@@ -1,0 +1,137 @@
+{{- range $pipeline := .Values.pipelines }}
+{{- $name := include "durable-clickhouse-sink.pipelineName" (list $ $pipeline) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-connector
+  labels:
+    {{- include "durable-clickhouse-sink.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: connector
+data:
+  config.json: |
+    {
+      "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+      "tasks.max": {{ $.Values.connect.tasksMax | quote }},
+      "topics": {{ $pipeline.topic | quote }},
+      "topic2TableMap": {{ printf "%s=%s" $pipeline.topic $pipeline.table | quote }},
+      "hostname": {{ $.Values.clickhouse.host | quote }},
+      "port": {{ $.Values.clickhouse.port | quote }},
+      "ssl": {{ ternary "true" "false" $.Values.clickhouse.secure | quote }},
+      "database": {{ default $.Values.clickhouse.database $pipeline.database | quote }},
+      "username": "${file:/etc/clickhouse/clickhouse.properties:username}",
+      "password": "${file:/etc/clickhouse/clickhouse.properties:password}",
+      "exactlyOnce": "true",
+      "consumer.override.isolation.level": "read_committed",
+      "errors.tolerance": "none",
+      "bufferCount": "0",
+      "zkPath": {{ printf "/durable-clickhouse-sink/%s/%s" $.Values.stateNamespace $pipeline.name | quote }},
+      "zkDatabase": {{ include "durable-clickhouse-sink.stateTable" (list $ $pipeline) | quote }},
+      "value.converter": {{ default "org.apache.kafka.connect.json.JsonConverter" $pipeline.valueConverter | quote }},
+      "value.converter.schemas.enable": {{ ternary "true" "false" (default false $pipeline.valueConverterSchemasEnable) | quote }},
+      "clickhouseSettings": "async_insert=0,insert_deduplicate=1"{{- range $key, $value := default dict $pipeline.connectorConfig }},
+      {{ $key | quote }}: {{ $value | toString | quote }}{{- end }}
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-register
+  labels:
+    {{- include "durable-clickhouse-sink.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: connector-manager
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: {{ $.Values.timeouts.hookJobSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: connector-manager
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      initContainers:
+        - name: validate-clickhouse-targets
+          image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
+          imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
+          command: ["/bin/durable-clickhouse-backup", "validate-targets", "/etc/durable-clickhouse/target.json"]
+          volumeMounts:
+            - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
+            - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
+      containers:
+        - name: register
+          image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
+          imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
+          command: ["/bin/bash", "-euc"]
+          args:
+            - |
+              endpoint="http://{{ include "durable-clickhouse-sink.fullname" $ }}-connect:8083"
+              curl_options=(--connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS")
+              until curl "${curl_options[@]}" --silent --fail "$endpoint/connector-plugins" >/dev/null; do sleep "$POLL_SECONDS"; done
+              curl "${curl_options[@]}" --fail-with-body --request PUT --header 'Content-Type: application/json' --data-binary @/connector/config.json "$endpoint/connectors/{{ $name }}/config"
+          env:
+            - {name: CONNECT_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectConnectSeconds | quote }}}
+            - {name: REQUEST_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectRequestSeconds | quote }}}
+            - {name: POLL_SECONDS, value: {{ $.Values.timeouts.connectPollSeconds | quote }}}
+          volumeMounts:
+            - {name: connector, mountPath: /connector, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: connector
+          configMap:
+            name: {{ $name }}-connector
+        - name: clickhouse-credentials
+          secret:
+            secretName: {{ $.Values.clickhouse.credentialsSecret.name }}
+            items:
+              - key: {{ $.Values.clickhouse.credentialsSecret.propertiesKey }}
+                path: clickhouse.properties
+        - name: runtime-config
+          configMap:
+            name: {{ include "durable-clickhouse-sink.fullname" $ }}-runtime
+        - {name: tmp, emptyDir: {}}
+---
+{{- if $.Values.connect.deleteConnectorsOnUninstall }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-unregister
+  labels:
+    {{- include "durable-clickhouse-sink.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: connector-manager
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: {{ $.Values.timeouts.hookJobSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: connector-manager
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      containers:
+        - name: unregister
+          image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
+          imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
+          command: ["/bin/bash", "-euc"]
+          args:
+            - curl --connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS" --silent --show-error --request DELETE "http://{{ include "durable-clickhouse-sink.fullname" $ }}-connect:8083/connectors/{{ $name }}" || true
+          env:
+            - {name: CONNECT_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectConnectSeconds | quote }}}
+            - {name: REQUEST_TIMEOUT_SECONDS, value: {{ $.Values.timeouts.connectRequestSeconds | quote }}}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+---
+{{- end }}
+{{- end }}

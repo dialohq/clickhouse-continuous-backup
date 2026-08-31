@@ -1,0 +1,121 @@
+{{- if .Values.topics.manage }}
+{{- range $pipeline := .Values.pipelines }}
+{{- $name := include "durable-clickhouse-sink.pipelineName" (list $ $pipeline) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-topics
+  labels:
+    {{- include "durable-clickhouse-sink.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: topic-manager
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: {{ $.Values.timeouts.hookJobSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: topic-manager
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      containers:
+        - name: topics
+          image: "{{ $.Values.connect.image.repository }}:{{ $.Values.connect.image.tag }}"
+          imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
+          command: ["/bin/bash", "-euc"]
+          args:
+            - |
+              config=()
+              if [[ -f /etc/kafka/client.properties ]]; then config=(--command-config /etc/kafka/client.properties); fi
+              create() {
+                /bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "${config[@]}" --create --if-not-exists --topic "$1" --partitions "$PARTITIONS" --replication-factor "$REPLICATION_FACTOR"
+              }
+              verify_partitions() {
+                description=$(/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "${config[@]}" --describe --topic "$1")
+                [[ "$description" =~ PartitionCount:[[:space:]]+$PARTITIONS([[:space:]]|$) ]] || { echo "$1 does not have $PARTITIONS partitions: $description" >&2; exit 1; }
+              }
+              configure() {
+                /bin/kafka-configs.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "${config[@]}" --entity-type topics --entity-name "$1" --alter --add-config "$2"
+              }
+              create "$TOPIC"
+              verify_partitions "$TOPIC"
+              configure "$TOPIC" "cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1"
+          env:
+            - {name: BOOTSTRAP_SERVERS, value: {{ $.Values.kafka.bootstrapServers | quote }}}
+            - {name: TOPIC, value: {{ $pipeline.topic | quote }}}
+            - {name: RETENTION, value: {{ int64 (default 7776000000 $pipeline.retentionMs) | quote }}}
+            - {name: PARTITIONS, value: {{ default $.Values.topics.partitions $pipeline.partitions | quote }}}
+            - {name: REPLICATION_FACTOR, value: {{ $.Values.kafka.replicationFactor | quote }}}
+          {{- if $.Values.kafka.existingSecret }}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /etc/kafka, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+          {{- else }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          {{- end }}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+        {{- if $.Values.kafka.existingSecret }}
+        {{- include "durable-clickhouse-sink.kafkaSecretVolume" $ | nindent 6 }}
+        {{- end }}
+---
+{{- end }}
+{{- end }}
+{{- if and .Values.backup.enabled .Values.topics.manage }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-backup-catalog-topic
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: topic-manager
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: {{ .Values.timeouts.hookJobSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
+        app.kubernetes.io/component: topic-manager
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      containers:
+        - name: topic
+          image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+          imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+          command: ["/bin/bash", "-euc"]
+          args:
+            - |
+              config=()
+              if [[ -f /etc/kafka/client.properties ]]; then config=(--command-config /etc/kafka/client.properties); fi
+              /bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "${config[@]}" --create --if-not-exists --topic "$BACKUP_CATALOG_TOPIC" --partitions 1 --replication-factor "$REPLICATION_FACTOR"
+              description=$(/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "${config[@]}" --describe --topic "$BACKUP_CATALOG_TOPIC")
+              [[ "$description" =~ PartitionCount:[[:space:]]+1([[:space:]]|$) ]] || { echo "$BACKUP_CATALOG_TOPIC does not have 1 partition: $description" >&2; exit 1; }
+              /bin/kafka-configs.sh --bootstrap-server "$BOOTSTRAP_SERVERS" "${config[@]}" --entity-type topics --entity-name "$BACKUP_CATALOG_TOPIC" --alter --add-config cleanup.policy=compact,retention.ms=-1,retention.bytes=-1
+          env:
+            - {name: BOOTSTRAP_SERVERS, value: {{ .Values.kafka.bootstrapServers | quote }}}
+            - {name: BACKUP_CATALOG_TOPIC, value: {{ include "durable-clickhouse-sink.catalogTopic" . | quote }}}
+            - {name: REPLICATION_FACTOR, value: {{ .Values.kafka.replicationFactor | quote }}}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.kafka.existingSecret }}
+            - {name: kafka-client, mountPath: /etc/kafka, readOnly: true}
+            {{- end }}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+        {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 6 }}
+---
+{{- end }}

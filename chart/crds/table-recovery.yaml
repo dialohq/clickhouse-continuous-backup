@@ -1,0 +1,162 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: tablerecoveries.chbackup.dialo.ai
+spec:
+  group: chbackup.dialo.ai
+  names:
+    kind: TableRecovery
+    plural: tablerecoveries
+    shortNames:
+    - chr
+    singular: tablerecovery
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for TableRecoverySpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              destination:
+                properties:
+                  database:
+                    type: string
+                  table:
+                    type: string
+                required:
+                - database
+                - table
+                type: object
+              source:
+                properties:
+                  backupID:
+                    type: string
+                  database:
+                    type: string
+                  table:
+                    type: string
+                required:
+                - backupID
+                - database
+                - table
+                type: object
+              targetOffsets:
+                items:
+                  properties:
+                    offset:
+                      format: uint64
+                      minimum: 0.0
+                      type: integer
+                    partition:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    topic:
+                      type: string
+                  required:
+                  - offset
+                  - partition
+                  - topic
+                  type: object
+                nullable: true
+                type: array
+            required:
+            - destination
+            - source
+            type: object
+            x-kubernetes-validations:
+            - message: TableRecovery spec is immutable
+              rule: self == oldSelf
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                items:
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              followConnectors:
+                items:
+                  type: string
+                nullable: true
+                type: array
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                nullable: true
+                type: string
+              replayConnectors:
+                items:
+                  type: string
+                nullable: true
+                type: array
+              resolvedStartOffsets:
+                items:
+                  properties:
+                    offset:
+                      format: uint64
+                      minimum: 0.0
+                      type: integer
+                    partition:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    topic:
+                      type: string
+                  required:
+                  - offset
+                  - partition
+                  - topic
+                  type: object
+                nullable: true
+                type: array
+              resolvedTargetOffsets:
+                items:
+                  properties:
+                    offset:
+                      format: uint64
+                      minimum: 0.0
+                      type: integer
+                    partition:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    topic:
+                      type: string
+                  required:
+                  - offset
+                  - partition
+                  - topic
+                  type: object
+                nullable: true
+                type: array
+            type: object
+        required:
+        - spec
+        title: TableRecovery
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
