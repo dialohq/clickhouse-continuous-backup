@@ -26,6 +26,24 @@ The state table is created in the target database. Every backup manifest stores
 its complete rows, Keeper path, and exact input offsets alongside the archive
 identity.
 
+## Backup metadata storage
+
+Backup orchestration depends on the `BackupMetadataStorage` contract, which
+acquires exclusive ownership of chain planning, loads the latest committed
+chain state, and commits an immutable manifest with its replacement chain
+state. Archive creation and recovery do not depend on Kafka record keys or
+serialization.
+
+The initial `KafkaBackupMetadataStorage` implementation uses the configured
+single-partition compacted topic. Its consumer-group assignment provides
+exclusive backup ownership, and one Kafka transaction commits the UUID-keyed
+manifest and chain head. The reserved chain-head key is private to this
+implementation.
+
+Other implementations may keep manifests in S3 and expose them through
+Kubernetes resources, provided they also serialize concurrent backup writers
+and never publish chain state that references an unavailable manifest.
+
 ## Why the target is not ReplacingMergeTree
 
 `ReplacingMergeTree` resolves equal sorting keys during background merges.

@@ -7,6 +7,8 @@ delivery, uploads that snapshot, and finally commits a backup manifest.
 
 The backup-catalog transaction is the commit point. An archive is not a
 completed backup until its manifest is committed to the backup catalog.
+`BackupMetadataStorage` owns this commit boundary; the initial Kafka backend
+implements it with the compacted catalog topic.
 
 ## Snapshot scope
 
@@ -97,4 +99,6 @@ before committing its manifest.
 | `KafkaLog::require_offsets_replayable` | Proves every recorded offset still exists in Kafka |
 | `ClickHouse::clone_target` | Copy-on-write immutable part snapshot |
 | `create_backup` | The complete capture, resume, upload, verification, manifest, and catalog-commit sequence |
+| `BackupMetadataStorage` | Backend-neutral ownership, chain-state load, and completed-backup commit boundary |
+| `KafkaBackupMetadataStorage` | Compacted-topic locking, lookup, and transactional publication |
 | `validate_manifest` | Independently tested manifest validation |

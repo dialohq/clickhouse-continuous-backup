@@ -1,10 +1,10 @@
 mod backup;
-mod catalog;
 mod clickhouse;
 mod config;
 mod connect;
 mod controller;
 mod kafka;
+mod metadata;
 mod model;
 mod preflight;
 mod recovery_resource;

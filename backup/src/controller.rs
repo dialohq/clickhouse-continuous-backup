@@ -12,11 +12,11 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     backup::validate_manifest,
-    catalog,
     clickhouse::{ClickHouse, RestoreState},
     config::ControllerConfig,
     connect::Connect,
-    model::{BackupManifest, KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperRow},
+    metadata::{BackupMetadataReader, KafkaBackupMetadataReader},
+    model::{KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperRow},
     recovery_resource::{RecoveryOffset, RecoveryPlan, TableRecovery, TableRecoveryStatus},
     replay::{KafkaReplay, kafka_identity},
 };
@@ -111,17 +111,17 @@ async fn reconcile_recovery(resource: &TableRecovery, context: &Context) -> Resu
     let uid = resource
         .uid()
         .context("TableRecovery has no Kubernetes UID")?;
-    let manifest = catalog::lookup(
+    let metadata = KafkaBackupMetadataReader::new(
         &context.config.kafka_bootstrap_servers,
         &context.kafka_properties,
-        &context.config.catalog_topic,
-        &resource.spec.source.backup_id,
+        context.config.catalog_topic.clone(),
         &uid,
         &context.config.timeouts,
-    )
-    .await?
-    .context("backup manifest was not found in the Kafka catalog")?;
-    let point: BackupManifest = serde_json::from_str(&manifest)?;
+    )?;
+    let point = metadata
+        .load_manifest(&resource.spec.source.backup_id)
+        .await?
+        .context("backup manifest was not found in metadata storage")?;
     validate_manifest(&point)?;
     let plan = RecoveryPlan::new(&resource.spec, &point)?;
     if let Some(targets) = &plan.target_offsets {
