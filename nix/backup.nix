@@ -1,4 +1,12 @@
-{rustPlatform, pkg-config, rustfmt, clippy, openssl, cyrus_sasl, rdkafka}:
+{
+  rustPlatform,
+  pkg-config,
+  rustfmt,
+  clippy,
+  openssl,
+  cyrus_sasl,
+  rdkafka,
+}:
 rustPlatform.buildRustPackage {
   pname = "durable-clickhouse-backup";
   version = "0.1.0";

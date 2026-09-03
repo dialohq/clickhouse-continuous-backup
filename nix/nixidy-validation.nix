@@ -19,11 +19,13 @@
           enabled = true;
           credentialsSecret.name = "clickhouse-backup-credentials";
         };
-        pipelines = [{
-          name = "records";
-          topic = "records.input";
-          table = "records";
-        }];
+        pipelines = [
+          {
+            name = "records";
+            topic = "records.input";
+            table = "records";
+          }
+        ];
       };
     };
   };

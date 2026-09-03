@@ -18,7 +18,13 @@
     };
   };
 
-  outputs = inputs @ {self, nixpkgs, nixidy, nix2container, ...}: let
+  outputs = {
+    self,
+    nixpkgs,
+    nixidy,
+    nix2container,
+    ...
+  }: let
     systems = ["x86_64-linux" "aarch64-linux"];
     forAllSystems = nixpkgs.lib.genAttrs systems;
   in {
@@ -73,13 +79,15 @@
           maxBandwidthBytesPerSecond = 262144;
           credentialsSecret.name = "clickhouse-credentials";
         };
-        pipelines = [{
-          name = "records";
-          topic = "records.input";
-          table = "records";
-          retentionMs = 3600000;
-          partitions = 3;
-        }];
+        pipelines = [
+          {
+            name = "records";
+            topic = "records.input";
+            table = "records";
+            retentionMs = 3600000;
+            partitions = 3;
+          }
+        ];
       };
     in {
       inherit backup chart chartSource e2eValues;
@@ -94,77 +102,81 @@
       pkgs = import nixpkgs {inherit system;};
     in {
       inherit (packages) backup manifests e2eManifests;
-      e2eScript = pkgs.runCommand "check-e2e-script" {
-        nativeBuildInputs = [pkgs.bash pkgs.shellcheck];
-      } ''
-        bash -n ${./e2e/run-rke2.sh}
-        shellcheck ${./e2e/run-rke2.sh}
-        touch $out
-      '';
-      chart = pkgs.runCommand "check-chart" {
-        nativeBuildInputs = [pkgs.kubernetes-helm];
-      } ''
-        chart_args=(
-          --set-string kafka.bootstrapServers=kafka.example:9092
-          --set-string clickhouse.host=clickhouse.example
-          --set-string clickhouse.credentialsSecret.name=clickhouse-credentials
-          --set-string 'pipelines[0].name=records'
-          --set-string 'pipelines[0].topic=records.input'
-          --set-string 'pipelines[0].table=records'
-          --set backup.enabled=true
-          --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
-          --set backup.maxIncrementalsPerFull=2
-          --set backup.maxBandwidthBytesPerSecond=1048576
-        )
-        helm lint --strict ${packages.chartSource} "''${chart_args[@]}"
-        helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
-        helm template test ${packages.chartSource} "''${chart_args[@]}" \
-          --set-string 'pipelines[1].name=other' \
-          --set-string 'pipelines[1].topic=other.input' \
-          --set-string 'pipelines[1].table=records' > rendered-shared-table.yaml
+      e2eScript =
+        pkgs.runCommand "check-e2e-script" {
+          nativeBuildInputs = [pkgs.bash pkgs.shellcheck];
+        } ''
+          bash -n ${./e2e/run-rke2.sh}
+          shellcheck ${./e2e/run-rke2.sh}
+          touch $out
+        '';
+      chart =
+        pkgs.runCommand "check-chart" {
+          nativeBuildInputs = [pkgs.kubernetes-helm];
+        } ''
+          chart_args=(
+            --set-string kafka.bootstrapServers=kafka.example:9092
+            --set-string clickhouse.host=clickhouse.example
+            --set-string clickhouse.credentialsSecret.name=clickhouse-credentials
+            --set-string 'pipelines[0].name=records'
+            --set-string 'pipelines[0].topic=records.input'
+            --set-string 'pipelines[0].table=records'
+            --set backup.enabled=true
+            --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
+            --set backup.maxIncrementalsPerFull=2
+            --set backup.maxBandwidthBytesPerSecond=1048576
+          )
+          helm lint --strict ${packages.chartSource} "''${chart_args[@]}"
+          helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
+          helm template test ${packages.chartSource} "''${chart_args[@]}" \
+            --set-string 'pipelines[1].name=other' \
+            --set-string 'pipelines[1].topic=other.input' \
+            --set-string 'pipelines[1].table=records' > rendered-shared-table.yaml
 
-        expect_rejected() {
-          if helm template test ${packages.chartSource} "''${chart_args[@]}" "$@" >/dev/null 2>&1; then
-            echo "unsafe values were accepted: $*" >&2
+          expect_rejected() {
+            if helm template test ${packages.chartSource} "''${chart_args[@]}" "$@" >/dev/null 2>&1; then
+              echo "unsafe values were accepted: $*" >&2
+              exit 1
+            fi
+          }
+          expect_rejected --set-string 'pipelines[0].connectorConfig.exactlyOnce=false'
+          expect_rejected --set backup.pauseTimeoutSeconds=0
+          expect_rejected --set backup.activeDeadlineSeconds=0
+          expect_rejected --set backup.terminationGracePeriodSeconds=15
+          expect_rejected --set timeouts.kafkaTransactionSeconds=0
+          expect_rejected --set-string "backup.pathPrefix=invalid')"
+          expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
+          expect_rejected --set-string 'pipelines[1].name=records' \
+            --set-string 'pipelines[1].topic=other.input' \
+            --set-string 'pipelines[1].table=other_records'
+
+          if grep -F "Disk('" rendered.yaml; then
+            echo "backup unexpectedly uses server-local Disk metadata" >&2
             exit 1
           fi
-        }
-        expect_rejected --set-string 'pipelines[0].connectorConfig.exactlyOnce=false'
-        expect_rejected --set backup.pauseTimeoutSeconds=0
-        expect_rejected --set backup.activeDeadlineSeconds=0
-        expect_rejected --set backup.terminationGracePeriodSeconds=15
-        expect_rejected --set timeouts.kafkaTransactionSeconds=0
-        expect_rejected --set-string "backup.pathPrefix=invalid')"
-        expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
-        expect_rejected --set-string 'pipelines[1].name=records' \
-          --set-string 'pipelines[1].topic=other.input' \
-          --set-string 'pipelines[1].table=other_records'
-
-        if grep -F "Disk('" rendered.yaml; then
-          echo "backup unexpectedly uses server-local Disk metadata" >&2
-          exit 1
-        fi
-        grep -F '/bin/durable-clickhouse-backup' rendered.yaml >/dev/null
-        grep -F 'validate-targets' rendered.yaml >/dev/null
-        grep -F 'async_insert=0,insert_deduplicate=1' rendered.yaml >/dev/null
-        grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
-        grep -F '/etc/durable-clickhouse/backup.json' rendered.yaml >/dev/null
-        grep -F '/etc/durable-clickhouse/target.json' rendered.yaml >/dev/null
-        grep -F '"maxIncrementalsPerFull": 2' rendered.yaml >/dev/null
-        grep -F '"maxBackupBandwidth": 1048576' rendered.yaml >/dev/null
-        grep -F '"catalogTopic": "test-durable-clickhouse-sink.backup-catalog"' rendered.yaml >/dev/null
-        grep -F '"kafkaTransactionSeconds":30' rendered.yaml >/dev/null
-        grep -F 'activeDeadlineSeconds: 21600' rendered.yaml >/dev/null
-        grep -F 'activeDeadlineSeconds: 600' rendered.yaml >/dev/null
-        grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
-        grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
-        grep -F '.backup-catalog' rendered.yaml >/dev/null
-        grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
-        touch $out
-      '';
+          grep -F '/bin/durable-clickhouse-backup' rendered.yaml >/dev/null
+          grep -F 'validate-targets' rendered.yaml >/dev/null
+          grep -F 'async_insert=0,insert_deduplicate=1' rendered.yaml >/dev/null
+          grep -F 'name: BACKUP_RUN_ID' rendered.yaml >/dev/null
+          grep -F '/etc/durable-clickhouse/backup.json' rendered.yaml >/dev/null
+          grep -F '/etc/durable-clickhouse/target.json' rendered.yaml >/dev/null
+          grep -F '"maxIncrementalsPerFull": 2' rendered.yaml >/dev/null
+          grep -F '"maxBackupBandwidth": 1048576' rendered.yaml >/dev/null
+          grep -F '"catalogTopic": "test-durable-clickhouse-sink.backup-catalog"' rendered.yaml >/dev/null
+          grep -F '"kafkaTransactionSeconds":30' rendered.yaml >/dev/null
+          grep -F 'activeDeadlineSeconds: 21600' rendered.yaml >/dev/null
+          grep -F 'activeDeadlineSeconds: 600' rendered.yaml >/dev/null
+          grep -F 'cleanup.policy=compact,retention.ms=-1,retention.bytes=-1' rendered.yaml >/dev/null
+          grep -F 'cleanup.policy=delete,retention.ms=$RETENTION,retention.bytes=-1' rendered.yaml >/dev/null
+          grep -F '.backup-catalog' rendered.yaml >/dev/null
+          grep -F 'durable_clickhouse_backups' rendered.yaml >/dev/null
+          touch $out
+        '';
     });
 
-    devShells = forAllSystems (system: let pkgs = import nixpkgs {inherit system;}; in {
+    devShells = forAllSystems (system: let
+      pkgs = import nixpkgs {inherit system;};
+    in {
       default = pkgs.mkShell {
         packages = [
           pkgs.apacheKafka
