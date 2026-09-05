@@ -1,5 +1,26 @@
 {
   "nodes": {
+    "dnvr": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1788603779,
+        "narHash": "sha256-pWqSVInTAP9VmSj1ECaefidUtGB7RbvvMPJmMNtFxZ4=",
+        "owner": "plan9better",
+        "repo": "dnvr",
+        "rev": "a96d64520cd527ff405fdc0b9b36c461f93af288",
+        "type": "github"
+      },
+      "original": {
+        "owner": "plan9better",
+        "ref": "runtime-config",
+        "repo": "dnvr",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -95,6 +116,7 @@
     },
     "root": {
       "inputs": {
+        "dnvr": "dnvr",
         "nix2container": "nix2container",
         "nixidy": "nixidy",
         "nixpkgs": "nixpkgs"

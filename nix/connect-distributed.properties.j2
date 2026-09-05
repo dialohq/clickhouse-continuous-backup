@@ -1,0 +1,17 @@
+bootstrap.servers={{ bootstrap_servers }}
+group.id=durable-clickhouse-sink-connect
+config.storage.topic=durable-clickhouse-sink.connect-configs
+offset.storage.topic=durable-clickhouse-sink.connect-offsets
+status.storage.topic=durable-clickhouse-sink.connect-status
+config.storage.replication.factor=1
+offset.storage.replication.factor=1
+status.storage.replication.factor=1
+key.converter=org.apache.kafka.connect.storage.StringConverter
+value.converter=org.apache.kafka.connect.json.JsonConverter
+value.converter.schemas.enable=false
+plugin.path={{ plugin_path }}
+listeners=http://{{ listen_host }}:{{ rest_port }}
+config.providers=file
+config.providers.file.class=org.apache.kafka.common.config.provider.FileConfigProvider
+connector.client.config.override.policy=All
+offset.flush.interval.ms=1000

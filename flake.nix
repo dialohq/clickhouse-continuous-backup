@@ -16,6 +16,10 @@
       url = "github:dialohq/nix2container/compressed-layers";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    dnvr = {
+      url = "github:plan9better/dnvr/runtime-config";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
@@ -23,6 +27,7 @@
     nixpkgs,
     nixidy,
     nix2container,
+    dnvr,
     ...
   }: let
     systems = ["x86_64-linux" "aarch64-linux"];
@@ -174,20 +179,17 @@
         '';
     });
 
-    devShells = forAllSystems (system: let
-      pkgs = import nixpkgs {inherit system;};
-    in {
-      default = pkgs.mkShell {
-        packages = [
-          pkgs.apacheKafka
-          pkgs.jq
-          pkgs.kubeconform
-          pkgs.kubectl
-          pkgs.kubernetes-helm
-          pkgs.containerd
-          pkgs.rke2
-        ];
+    devShells = nixpkgs.lib.genAttrs ["x86_64-linux"] (system: let
+      pkgs = import nixpkgs {
+        inherit system;
+        config = {
+          permittedInsecurePackages = [
+            "minio-2025-10-15T17-29-55Z"
+          ];
+        };
       };
-    });
+      dnvrFramework = import dnvr {inherit pkgs;};
+    in
+      (dnvrFramework.mkShells [./nix/dev.nix]).devShells);
   };
 }

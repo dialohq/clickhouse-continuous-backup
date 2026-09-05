@@ -1,0 +1,21 @@
+{
+  "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+  "tasks.max": "1",
+  "topics": "records.input",
+  "topic2TableMap": "records.input=records",
+  "hostname": {{ clickhouse_host | tojson }},
+  "port": {{ clickhouse_port | string | tojson }},
+  "ssl": "false",
+  "database": "durable_e2e",
+  "username": "default",
+  "password": "",
+  "exactlyOnce": "true",
+  "consumer.override.isolation.level": "read_committed",
+  "errors.tolerance": "none",
+  "bufferCount": "0",
+  "zkPath": "/durable-clickhouse-sink/e2e/records",
+  "zkDatabase": "durable_clickhouse_sink_records_state",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+  "clickhouseSettings": "async_insert=0,insert_deduplicate=1"
+}
