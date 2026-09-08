@@ -5,6 +5,62 @@
 }: let
   supervise = import ./supervise.nix {lib = pkgs.lib;};
   connector = pkgs.callPackage ./clickhouse-kafka-connect.nix {};
+  backupConfig = pkgs.writeShellApplication {
+    name = "dnvr-backup-config";
+    runtimeInputs = [dnvrState pkgs.jq pkgs.redpanda-client];
+    text = ''
+      if [[ $# != 0 ]]; then
+        echo "Usage: dnvr-backup-config > backup.json" >&2
+        exit 2
+      fi
+
+      connect_url=$(dnvr-state get connect.url)
+      clickhouse_url=$(dnvr-state get clickhouse.httpUrl)
+      kafka=$(dnvr-state get redpanda.bootstrapServers)
+      partitions=$(rpk --ignore-profile -X brokers="$kafka" \
+        topic describe records.input --format json \
+        | jq -e '.[0].summary | if .error == "" and .partitions > 0
+          then .partitions else error("records.input metadata is unavailable") end')
+
+      jq -n \
+        --arg connect_url "$connect_url" \
+        --arg clickhouse_url "$clickhouse_url" \
+        --arg kafka "$kafka" \
+        --argjson partitions "$partitions" \
+        '{
+          connectUrl: $connect_url,
+          clickhouseUrl: $clickhouse_url,
+          namedCollection: "durable_backups",
+          pathPrefix: "durable-e2e",
+          archiveExtension: "tar.zst",
+          pauseTimeoutSeconds: 30,
+          kafkaBootstrapServers: $kafka,
+          kafkaPropertiesFile: null,
+          catalogTopic: "durable-clickhouse-sink.backup-catalog",
+          maxIncrementalsPerFull: 2,
+          maxBackupBandwidth: 262144,
+          pipelines: [{
+            connector: "durable-clickhouse-sink-records",
+            database: "durable_e2e",
+            state_table: "durable_clickhouse_sink_records_state",
+            keeper_path: "/durable-clickhouse-sink/e2e/records",
+            table: "records",
+            topic: "records.input",
+            partitions: $partitions
+          }],
+          timeouts: {
+            clickhouseConnectSeconds: 10,
+            connectConnectSeconds: 10,
+            connectRequestSeconds: 30,
+            connectPollSeconds: 1,
+            kafkaMetadataSeconds: 10,
+            kafkaCatalogReadSeconds: 15,
+            kafkaTransactionSeconds: 30,
+            kafkaMaxPollSeconds: 86400
+          }
+        }'
+    '';
+  };
   redpanda = pkgs.stdenvNoCC.mkDerivation {
     pname = "redpanda";
     version = "26.2.2";
@@ -16,8 +72,10 @@
     nativeBuildInputs = [pkgs.patchelf];
     installPhase = ''
       runHook preInstall
-      mkdir -p "$out"
-      cp -a bin lib libexec "$out/"
+      mkdir -p "$out/bin" "$out/libexec"
+      cp -a lib "$out/"
+      cp -a bin/redpanda "$out/bin/"
+      cp -a libexec/redpanda "$out/libexec/"
       substituteInPlace "$out/bin/redpanda" \
         --replace-fail /opt/redpanda "$out"
       patchelf \
@@ -32,6 +90,8 @@ in {
     description = "Durable ClickHouse sink development services";
 
     packages = [
+      backupConfig
+      pkgs.awscli
       pkgs.apacheKafka
       pkgs.clickhouse
       pkgs.curl
@@ -39,16 +99,20 @@ in {
       pkgs.kubeconform
       pkgs.kubectl
       pkgs.kubernetes-helm
-      pkgs.containerd
-      pkgs.rke2
       pkgs.minio
       pkgs.minio-client
+      pkgs.redpanda-client
       redpanda
       pkgs.cargo
       pkgs.rustc
       pkgs.rust-analyzer
       pkgs.clippy
       pkgs.rustfmt
+      pkgs.pkg-config
+      pkgs.openssl
+      pkgs.cyrus_sasl
+      pkgs.rdkafka
+      pkgs.openssl
     ];
 
     processes.minio = {
@@ -58,9 +122,9 @@ in {
         runtimeInputs = [pkgs.minio pkgs.curl dnvrState];
         text = ''
           set -euo pipefail
-          port=$(dnvr-state pick-port)
-          console_port=$(dnvr-state pick-port)
-          data="$DNVR_ROOT/.dnvr/data/minio"
+          port=$(dnvr-state pick-port port)
+          console_port=$(dnvr-state pick-port consolePort)
+          data="$DNVR_STATE/data/minio"
           mkdir -p "$data"
 
           ${supervise {
@@ -109,10 +173,10 @@ in {
         runtimeInputs = [redpanda pkgs.curl pkgs.minijinja dnvrState];
         text = ''
           set -euo pipefail
-          kafka_port=$(dnvr-state pick-port)
-          admin_port=$(dnvr-state pick-port)
-          rpc_port=$(dnvr-state pick-port)
-          data="$DNVR_ROOT/.dnvr/data/redpanda"
+          kafka_port=$(dnvr-state pick-port port)
+          admin_port=$(dnvr-state pick-port adminPort)
+          rpc_port=$(dnvr-state pick-port rpcPort)
+          data="$DNVR_STATE/data/redpanda"
           config="$DNVR_RUNTIME_DIR/redpanda.yaml"
           mkdir -p "$data"
 
@@ -134,6 +198,10 @@ in {
             '';
             readyWhen = ''curl --fail --silent "http://127.0.0.1:$admin_port/v1/status/ready" >/dev/null'';
             onReady = ''
+              curl --fail-with-body --silent --show-error \
+                --request PUT --header 'Content-Type: application/json' \
+                --data '{"upsert":{"group_min_session_timeout_ms":2000},"remove":[]}' \
+                "http://127.0.0.1:$admin_port/v1/cluster_config" >/dev/null
               dnvr-state set host 127.0.0.1
               dnvr-state set port "$kafka_port"
               dnvr-state set adminPort "$admin_port"
@@ -156,12 +224,12 @@ in {
         runtimeInputs = [pkgs.clickhouse pkgs.curl pkgs.minijinja dnvrState];
         text = ''
           set -euo pipefail
-          http_port=$(dnvr-state pick-port)
-          tcp_port=$(dnvr-state pick-port)
-          interserver_http_port=$(dnvr-state pick-port)
-          keeper_port=$(dnvr-state pick-port)
-          keeper_raft_port=$(dnvr-state pick-port)
-          data="$DNVR_ROOT/.dnvr/data/clickhouse"
+          http_port=$(dnvr-state pick-port httpPort)
+          tcp_port=$(dnvr-state pick-port tcpPort)
+          interserver_http_port=$(dnvr-state pick-port interserverHttpPort)
+          keeper_port=$(dnvr-state pick-port keeperPort)
+          keeper_raft_port=$(dnvr-state pick-port keeperRaftPort)
+          data="$DNVR_STATE/data/clickhouse"
           config="$DNVR_RUNTIME_DIR/config.xml"
           mkdir -p "$data"
 
@@ -201,7 +269,7 @@ in {
         name = "durable-sink-connect";
         runtimeInputs = [pkgs.apacheKafka pkgs.curl pkgs.minijinja dnvrState];
         text = ''
-          rest_port=$(dnvr-state pick-port)
+          rest_port=$(dnvr-state pick-port port)
           config="$DNVR_RUNTIME_DIR/connect-distributed.properties"
 
           minijinja-cli --strict --autoescape none \
@@ -217,7 +285,6 @@ in {
             readyWhen = ''curl --fail --silent "http://127.0.0.1:$rest_port/connector-plugins" >/dev/null'';
             onReady = ''
               dnvr-state set host 127.0.0.1
-              dnvr-state set port "$rest_port"
               dnvr-state set url "http://127.0.0.1:$rest_port"
               echo "Kafka Connect ready at http://127.0.0.1:$rest_port"
             '';
@@ -227,25 +294,23 @@ in {
     };
 
     processes.records-topic = {
-      packages = [pkgs.apacheKafka];
+      packages = [pkgs.redpanda-client];
       env.KAFKA_BOOTSTRAP_SERVERS = "dnvr://redpanda/bootstrapServers";
       command = pkgs.writeShellApplication {
         name = "durable-sink-records-topic";
-        runtimeInputs = [pkgs.apacheKafka];
+        runtimeInputs = [pkgs.redpanda-client];
         text = ''
-          kafka-topics.sh \
-            --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS" \
-            --create \
+          rpk --ignore-profile -X brokers="$KAFKA_BOOTSTRAP_SERVERS" \
+            topic create records.input \
             --if-not-exists \
-            --topic records.input \
             --partitions 3 \
-            --replication-factor 1
+            --replicas 1
         '';
       };
     };
 
     processes.records-connector = {
-      packages = [pkgs.apacheKafka pkgs.clickhouse pkgs.curl pkgs.minijinja];
+      packages = [pkgs.redpanda-client pkgs.clickhouse pkgs.curl pkgs.minijinja];
       env = {
         CONNECT_URL = "dnvr://connect/url";
         KAFKA_BOOTSTRAP_SERVERS = "dnvr://redpanda/bootstrapServers";
@@ -255,14 +320,13 @@ in {
       };
       command = pkgs.writeShellApplication {
         name = "durable-sink-records-connector";
-        runtimeInputs = [pkgs.apacheKafka pkgs.clickhouse pkgs.curl pkgs.gnugrep pkgs.minijinja];
+        runtimeInputs = [pkgs.redpanda-client pkgs.clickhouse pkgs.curl pkgs.jq pkgs.minijinja];
         text = ''
           config="$DNVR_RUNTIME_DIR/records-connector.json"
 
-          until kafka-topics.sh \
-            --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS" \
-            --describe --topic records.input 2>/dev/null \
-            | grep -q 'PartitionCount: 3'; do
+          until rpk --ignore-profile -X brokers="$KAFKA_BOOTSTRAP_SERVERS" \
+            topic describe records.input --format json 2>/dev/null \
+            | jq -e '.[0].summary | .error == "" and .partitions == 3' >/dev/null; do
             sleep 0.2
           done
           until [[ $(clickhouse-client \
@@ -292,6 +356,7 @@ in {
         CLICKHOUSE_HOST = "dnvr://clickhouse/host";
         CLICKHOUSE_TCP_PORT = "dnvr://clickhouse/tcpPort";
         CLICKHOUSE_DATABASE = "durable_e2e";
+        SCHEMA_FILE = toString ./schema.sql;
       };
       command = pkgs.writeShellApplication {
         name = "durable-sink-schema";
@@ -301,7 +366,7 @@ in {
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --multiquery \
-            < "$DNVR_ROOT/e2e/schema.sql"
+            < "$SCHEMA_FILE"
           echo "Applied schema for $CLICKHOUSE_DATABASE"
         '';
       };

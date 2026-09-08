@@ -47,58 +47,10 @@
         modules = [./nix/nixidy-validation.nix];
         extraSpecialArgs = {inherit chartSource;};
       };
-      e2eEnv = nixidy.lib.mkEnv {
-        inherit pkgs;
-        modules = [./nix/e2e.nix];
-      };
-      e2eValues = (pkgs.formats.json {}).generate "durable-clickhouse-sink-e2e-values.json" {
-        stateNamespace = "e2e";
-        kafka = {
-          bootstrapServers = "redpanda.durable-sink-e2e.svc.cluster.local:9092";
-          replicationFactor = 1;
-          internalTopicReplicationFactor = 1;
-        };
-        clickhouse = {
-          host = "clickhouse.durable-sink-e2e.svc.cluster.local";
-          port = 8123;
-          secure = false;
-          database = "durable_e2e";
-          credentialsSecret.name = "clickhouse-credentials";
-        };
-        connect = {
-          replicas = 1;
-          tasksMax = 1;
-          image = {
-            repository = "ghcr.io/dialohq/durable-clickhouse-connect";
-            tag = "e2e";
-            pullPolicy = "Never";
-          };
-        };
-        topics.partitions = 3;
-        backup = {
-          enabled = true;
-          suspend = true;
-          namedCollection = "durable_backups";
-          pathPrefix = "durable-e2e";
-          maxIncrementalsPerFull = 2;
-          maxBandwidthBytesPerSecond = 262144;
-          credentialsSecret.name = "clickhouse-credentials";
-        };
-        pipelines = [
-          {
-            name = "records";
-            topic = "records.input";
-            table = "records";
-            retentionMs = 3600000;
-            partitions = 3;
-          }
-        ];
-      };
     in {
-      inherit backup chart chartSource e2eValues;
+      inherit backup chart chartSource;
       connectImage = images.connect;
       manifests = nixidyEnv.environmentPackage;
-      e2eManifests = e2eEnv.environmentPackage;
       default = chart;
     });
 
@@ -106,15 +58,7 @@
       packages = self.packages.${system};
       pkgs = import nixpkgs {inherit system;};
     in {
-      inherit (packages) backup manifests e2eManifests;
-      e2eScript =
-        pkgs.runCommand "check-e2e-script" {
-          nativeBuildInputs = [pkgs.bash pkgs.shellcheck];
-        } ''
-          bash -n ${./e2e/run-rke2.sh}
-          shellcheck ${./e2e/run-rke2.sh}
-          touch $out
-        '';
+      inherit (packages) backup manifests;
       chart =
         pkgs.runCommand "check-chart" {
           nativeBuildInputs = [pkgs.kubernetes-helm];
@@ -183,6 +127,7 @@
       pkgs = import nixpkgs {
         inherit system;
         config = {
+          allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "redpanda-rpk";
           permittedInsecurePackages = [
             "minio-2025-10-15T17-29-55Z"
           ];

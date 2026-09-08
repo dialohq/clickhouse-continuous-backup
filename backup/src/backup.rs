@@ -11,10 +11,10 @@ use crate::{
     kafka::KafkaLog,
     metadata::{BackupMetadataLease, BackupMetadataStorage, KafkaBackupMetadataStorage},
     model::{
-        BackupChainState, BackupKind, BackupManifest, BackupOutput, BackupParent, BackupReference,
-        ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperCheckpoint,
-        KeeperRow, Pipeline, clickhouse_identifier, kafka_name, safe_chain_id, safe_keeper_path,
-        safe_storage_path,
+        BackupChain, BackupChainState, BackupKind, BackupManifest, BackupOutput, BackupParent,
+        BackupReference, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue, KafkaPartition,
+        KeeperCheckpoint, KeeperRow, Pipeline, clickhouse_identifier, kafka_name, safe_chain_id,
+        safe_keeper_path, safe_storage_path,
     },
     snapshot::SnapshotLayout,
 };
@@ -29,8 +29,8 @@ struct BackupPlan {
     pipelines: Vec<Pipeline>,
 }
 
-pub async fn run(path: &std::path::Path) -> Result<()> {
-    let config = BackupConfig::from_file(path)?;
+pub async fn run(config: &BackupConfig) -> Result<BackupOutput> {
+    config.validate()?;
     let connectors = config
         .pipelines
         .iter()
@@ -49,7 +49,7 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
         &config.timeouts,
     )?;
     let lease = metadata.acquire().await?;
-    validate_chain_state(lease.chain_state(), &config.pipelines)?;
+    validate_chain(lease.chain(), &config.pipelines)?;
     let plan = plan_backup(
         lease.chain_state(),
         config.max_incrementals_per_full,
@@ -67,7 +67,7 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
     let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines);
     snapshots.cleanup(&clickhouse).await?;
 
-    let operation = create_backup(&config, &connect, &clickhouse, lease, &plan, &snapshots);
+    let operation = create_backup(config, &connect, &clickhouse, lease, &plan, &snapshots);
     tokio::pin!(operation);
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -81,9 +81,9 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
         eprintln!("failed to remove ClickHouse snapshot tables: {error:#}");
     }
     match (result, resume) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(output), Ok(())) => Ok(output),
         (Err(operation), Ok(())) => Err(operation),
-        (Ok(()), Err(resume)) => Err(resume),
+        (Ok(_), Err(resume)) => Err(resume),
         (Err(operation), Err(resume)) => Err(operation.context(resume)),
     }
 }
@@ -95,7 +95,7 @@ async fn create_backup(
     metadata: impl BackupMetadataLease,
     plan: &BackupPlan,
     snapshots: &SnapshotLayout,
-) -> Result<()> {
+) -> Result<BackupOutput> {
     let kafka = KafkaLog::new(
         &config.kafka_bootstrap_servers,
         &config.kafka_properties()?,
@@ -166,14 +166,7 @@ async fn create_backup(
     };
     metadata.commit(&manifest, &chain_state).await?;
 
-    println!(
-        "{}",
-        serde_json::to_string(&BackupOutput {
-            details: &details,
-            manifest: &manifest,
-        })?
-    );
-    Ok(())
+    Ok(BackupOutput { details, manifest })
 }
 
 pub(crate) fn require_unchanged_keeper(
@@ -315,6 +308,89 @@ pub(crate) fn checkpoint(
             rows,
         },
     })
+}
+
+pub fn validate_chain(chain: Option<&BackupChain>, pipelines: &[Pipeline]) -> Result<()> {
+    let Some(chain) = chain else { return Ok(()) };
+    let state = &chain.state;
+    validate_chain_state(Some(state), pipelines)?;
+    // the reader returns manifests from the current tip back to the full backup.
+    if chain.manifests.len() as u64 != u64::from(state.incremental_count) + 1
+        || state.generation <= u64::from(state.incremental_count)
+        || chain.manifests.first().map(|point| &point.backup) != Some(&state.tip)
+        || chain.manifests.last().map(|point| &point.backup) != Some(&state.root)
+        || has_duplicates(
+            chain
+                .manifests
+                .iter()
+                .map(|point| point.backup.id)
+                .collect(),
+        )
+        || has_duplicates(
+            chain
+                .manifests
+                .iter()
+                .map(|point| &point.backup.name)
+                .collect(),
+        )
+    {
+        bail!("invalid backup chain: count, endpoints, generation, or duplicate backups")
+    }
+    for (index, point) in chain.manifests.iter().enumerate() {
+        validate_manifest(point)?;
+        if point.backup.id.is_nil()
+            || point.backup.chain_id != state.chain_id
+            || u64::from(point.backup.position) != u64::from(state.incremental_count) - index as u64
+            || point.connectors.len() != pipelines.len()
+        {
+            bail!("invalid backup chain manifest {}", point.backup.id)
+        }
+        let parent = chain.manifests.get(index + 1);
+        if point
+            .backup
+            .parent
+            .as_ref()
+            .map(|parent| (parent.id, &parent.name))
+            != parent.map(|parent| (parent.backup.id, &parent.backup.name))
+        {
+            bail!("invalid backup chain parent for {}", point.backup.id)
+        }
+        for pipeline in pipelines {
+            let checkpoint = point
+                .connectors
+                .iter()
+                .find(|checkpoint| {
+                    checkpoint.name == pipeline.connector
+                        && checkpoint.topic == pipeline.topic
+                        && checkpoint.partitions == pipeline.partitions
+                        && checkpoint.keeper.database == pipeline.database
+                        && checkpoint.keeper.table == pipeline.state_table
+                        && checkpoint.keeper.path == pipeline.keeper_path
+                })
+                .context("backup chain manifest does not match configured pipelines")?;
+            if let Some(parent) = parent {
+                let previous = parent
+                    .connectors
+                    .iter()
+                    .find(|previous| previous.name == checkpoint.name)
+                    .context("backup chain parent is missing a connector")?;
+                if checkpoint
+                    .offsets
+                    .iter()
+                    .zip(&previous.offsets)
+                    .any(|(current, previous)| {
+                        current.offset.kafka_offset < previous.offset.kafka_offset
+                    })
+                {
+                    bail!(
+                        "backup chain offsets move backwards for {}",
+                        checkpoint.name
+                    )
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_chain_state(state: Option<&BackupChainState>, pipelines: &[Pipeline]) -> Result<()> {
@@ -782,6 +858,114 @@ mod tests {
     #[test]
     fn validates_exact_manifest() {
         assert!(validate_manifest(&manifest()).is_ok());
+    }
+
+    fn chain(incremental_count: u32) -> BackupChain {
+        BackupChain {
+            state: chain_state(incremental_count),
+            manifests: (0..=incremental_count)
+                .rev()
+                .map(|position| {
+                    let mut point = manifest();
+                    point.backup = chain_state(position).tip;
+                    point
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn validates_complete_backup_chains() {
+        assert!(validate_chain(None, &[pipeline()]).is_ok());
+        for count in 0..=3 {
+            assert!(validate_chain(Some(&chain(count)), &[pipeline()]).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_broken_backup_chain_links() {
+        let reject = |mutate: fn(&mut BackupChain)| {
+            let mut chain = chain(2);
+            mutate(&mut chain);
+            assert!(validate_chain(Some(&chain), &[pipeline()]).is_err());
+        };
+        reject(|chain| {
+            chain.manifests.clear();
+        });
+        reject(|chain| {
+            chain.manifests.remove(1);
+        });
+        reject(|chain| {
+            chain.manifests.push(chain.manifests[2].clone());
+        });
+        reject(|chain| {
+            chain.state.tip.id = Uuid::from_u128(999);
+        });
+        reject(|chain| {
+            chain.state.root.id = Uuid::from_u128(999);
+        });
+        reject(|chain| {
+            chain.state.generation = 2;
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.id = Uuid::nil();
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.id = chain.manifests[0].backup.id;
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.name = chain.manifests[0].backup.name.clone();
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.chain_id = "other-chain".to_owned();
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.position = 2;
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.parent.as_mut().unwrap().id = Uuid::from_u128(999);
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.parent.as_mut().unwrap().name =
+                "S3(backups, 'other.tar.zst')".to_owned();
+        });
+        reject(|chain| {
+            chain.manifests[1].backup.parent = None;
+        });
+    }
+
+    #[test]
+    fn rejects_invalid_backup_chain_checkpoints() {
+        let reject = |mutate: fn(&mut BackupChain)| {
+            let mut chain = chain(2);
+            mutate(&mut chain);
+            assert!(validate_chain(Some(&chain), &[pipeline()]).is_err());
+        };
+        reject(|chain| {
+            chain.manifests[1].connectors.clear();
+        });
+        reject(|chain| {
+            chain.manifests[1].connectors[0].name = "other".to_owned();
+        });
+        reject(|chain| {
+            chain.manifests[1].connectors[0].keeper.path = "/other".to_owned();
+        });
+        reject(|chain| {
+            chain.manifests[1].connectors[0].keeper.rows[0].state = "BEFORE_PROCESSING".to_owned();
+        });
+        reject(|chain| {
+            chain.manifests[1].connectors[0].offsets[0]
+                .offset
+                .kafka_offset = 11;
+        });
+        // Each manifest is valid on its own, but the child's checkpoint regresses.
+        let mut backwards = chain(1);
+        backwards.manifests[1].connectors[0].keeper.rows[0].max_offset = 10;
+        backwards.manifests[1].connectors[0].offsets[0]
+            .offset
+            .kafka_offset = 11;
+        assert!(validate_manifest(&backwards.manifests[1]).is_ok());
+        assert!(validate_chain(Some(&backwards), &[pipeline()]).is_err());
     }
 
     #[test]

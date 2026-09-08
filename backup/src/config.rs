@@ -36,11 +36,6 @@ pub struct RuntimeTimeouts {
     #[serde(rename = "kafkaMetadataSeconds", deserialize_with = "positive_seconds")]
     pub kafka_metadata: Duration,
     #[serde(
-        rename = "kafkaCatalogAcquireSeconds",
-        deserialize_with = "positive_seconds"
-    )]
-    pub kafka_catalog_acquire: Duration,
-    #[serde(
         rename = "kafkaCatalogReadSeconds",
         deserialize_with = "positive_seconds"
     )]
@@ -108,22 +103,29 @@ impl BackupConfig {
         config.run_id = required("BACKUP_RUN_ID")?;
         config.clickhouse_username = required("CLICKHOUSE_USERNAME")?;
         config.clickhouse_password = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
-        if !safe_chain_id(&config.run_id) {
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.clickhouse_username.is_empty() {
+            bail!("ClickHouse username is required")
+        }
+        if !safe_chain_id(&self.run_id) {
             bail!("BACKUP_RUN_ID contains unsupported characters")
         }
-        if !clickhouse_identifier(&config.named_collection) {
+        if !clickhouse_identifier(&self.named_collection) {
             bail!("namedCollection must be a ClickHouse identifier")
         }
-        if !safe_storage_path(&config.path_prefix) {
+        if !safe_storage_path(&self.path_prefix) {
             bail!("pathPrefix must be a relative object path without empty, . or .. segments")
         }
         if !["tar.zst", "tar.gz", "tar.xz", "tar.bz2", "tgz", "tzst"]
-            .contains(&config.archive_extension.as_str())
+            .contains(&self.archive_extension.as_str())
         {
             bail!("unsupported archiveExtension")
         }
-        validate_pipelines(&config.pipelines)?;
-        Ok(config)
+        validate_pipelines(&self.pipelines)?;
+        Ok(())
     }
 
     pub fn kafka_properties(&self) -> Result<HashMap<String, String>> {
@@ -210,7 +212,6 @@ mod tests {
         "connectRequestSeconds": 15,
         "connectPollSeconds": 1,
         "kafkaMetadataSeconds": 15,
-        "kafkaCatalogAcquireSeconds": 30,
         "kafkaCatalogReadSeconds": 15,
         "kafkaTransactionSeconds": 30,
         "kafkaMaxPollSeconds": 86400

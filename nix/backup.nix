@@ -16,6 +16,9 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [pkg-config rustfmt clippy];
   buildInputs = [openssl cyrus_sasl rdkafka];
 
+  # E2E tests launch dnvr services and run separately in the development shell.
+  cargoTestFlags = ["--lib" "--bins"];
+
   postCheck = ''
     cargo fmt --check
     cargo clippy --all-targets -- --deny warnings

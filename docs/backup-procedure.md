@@ -10,6 +10,29 @@ completed backup until its manifest is committed to the backup catalog.
 `BackupMetadataStorage` owns this commit boundary; the initial Kafka backend
 implements it with the compacted catalog topic.
 
+## Local dnvr configuration
+
+With the dnvr services running, the development shell provides:
+
+```sh
+dnvr-backup-config > backup.json
+```
+
+In Nushell, use `dnvr-backup-config | save backup.json`.
+The command reads `connect.url`, `clickhouse.httpUrl`, and
+`redpanda.bootstrapServers` through `dnvr-state get`, using the current
+`DNVR_STATE`, and queries `records.input` with rpk for its actual partition
+count. Missing or stale service state causes it to fail. The remaining
+settings match the development `records` pipeline and E2E backup defaults.
+Regenerate the file if service addresses change.
+
+This only prints JSON: it does not create the backup-catalog topic, pause
+ingestion, or trigger a backup. Before running the backup, ensure the catalog
+exists with one partition, `cleanup.policy=compact`, and unlimited retention.
+The backup command still requires `BACKUP_RUN_ID` and `CLICKHOUSE_USERNAME`;
+`CLICKHOUSE_PASSWORD` is optional and defaults to empty. Credentials and the
+run ID are not included in the generated file.
+
 ## Snapshot scope
 
 One physical target table and every connector writing it form one consistency

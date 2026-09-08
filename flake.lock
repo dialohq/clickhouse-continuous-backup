@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788603779,
-        "narHash": "sha256-pWqSVInTAP9VmSj1ECaefidUtGB7RbvvMPJmMNtFxZ4=",
+        "lastModified": 1788855491,
+        "narHash": "sha256-ATg9TQ4mDNwhy5b7uTGT9wbEgfJGFBVu8vQh70A/rcU=",
         "owner": "plan9better",
         "repo": "dnvr",
-        "rev": "a96d64520cd527ff405fdc0b9b36c461f93af288",
+        "rev": "a9aeb8f3b8f16dcdf1af5cfd87617b776269c05e",
         "type": "github"
       },
       "original": {

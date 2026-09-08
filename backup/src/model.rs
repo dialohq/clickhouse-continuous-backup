@@ -185,6 +185,12 @@ pub struct BackupChainState {
     pub pipelines: Vec<Pipeline>,
 }
 
+pub struct BackupChain {
+    pub state: BackupChainState,
+    /// Ordered from the current tip back to the full backup that started the chain.
+    pub manifests: Vec<BackupManifest>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BackupDetails {
     pub id: Uuid,
@@ -196,8 +202,8 @@ pub struct BackupDetails {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct BackupOutput<'a> {
+pub struct BackupOutput {
     #[serde(flatten)]
-    pub details: &'a BackupDetails,
-    pub manifest: &'a BackupManifest,
+    pub details: BackupDetails,
+    pub manifest: BackupManifest,
 }

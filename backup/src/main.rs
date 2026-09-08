@@ -1,15 +1,6 @@
-mod backup;
-mod clickhouse;
-mod config;
-mod connect;
-mod kafka;
-mod metadata;
-mod model;
-mod preflight;
-mod snapshot;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use durable_clickhouse_backup::{config::BackupConfig, preflight};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -27,7 +18,12 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Backup { config } => backup::run(&config).await,
+        Command::Backup { config } => {
+            let config = BackupConfig::from_file(&config)?;
+            let output = durable_clickhouse_backup::run(&config).await?;
+            println!("{}", serde_json::to_string(&output)?);
+            Ok(())
+        }
         Command::ValidateTargets { config } => preflight::run(&config).await,
     }
 }
