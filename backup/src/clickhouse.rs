@@ -9,7 +9,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(from = "String")]
-enum Engine {
+pub enum Engine {
     MergeTree,
     ReplacingMergeTree,
     SummingMergeTree,
@@ -127,7 +127,7 @@ impl Engine {
         }
     }
 
-    fn is_replicated(&self) -> bool {
+    pub fn is_replicated(&self) -> bool {
         matches!(
             self,
             Self::ReplicatedMergeTree
@@ -164,10 +164,10 @@ impl std::fmt::Display for Engine {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct TableEngine {
-    database: String,
-    name: String,
-    engine: Engine,
+pub struct TableEngine {
+    pub database: String,
+    pub name: String,
+    pub engine: Engine,
     create_table_query: String,
 }
 
@@ -340,6 +340,12 @@ impl ClickHouse {
         Ok(())
     }
 
+    pub async fn sync_replication(&self, database: &str, table: &str) -> Result<()> {
+        self.query(&format!("SYSTEM SYNC REPLICA `{database}`.`{table}`"))
+            .await?;
+        Ok(())
+    }
+
     pub async fn drop_table(&self, database: &str, table: &str) -> Result<()> {
         self.query(&format!("DROP TABLE IF EXISTS `{database}`.`{table}` SYNC"))
             .await?;
@@ -454,15 +460,19 @@ impl ClickHouse {
         }
     }
 
-    pub async fn require_backup_engines(&self, pipelines: &[Pipeline]) -> Result<()> {
+    pub async fn require_backup_engines(&self, pipelines: &[Pipeline]) -> Result<Vec<TableEngine>> {
         self.require_engines(pipelines, true).await
     }
 
-    pub async fn require_target_engines(&self, pipelines: &[Pipeline]) -> Result<()> {
+    pub async fn require_target_engines(&self, pipelines: &[Pipeline]) -> Result<Vec<TableEngine>> {
         self.require_engines(pipelines, false).await
     }
 
-    async fn require_engines(&self, pipelines: &[Pipeline], require_state: bool) -> Result<()> {
+    async fn require_engines(
+        &self,
+        pipelines: &[Pipeline],
+        require_state: bool,
+    ) -> Result<Vec<TableEngine>> {
         let names = pipelines
             .iter()
             .flat_map(|pipeline| {
@@ -480,7 +490,9 @@ impl ClickHouse {
             ))
             .await?;
 
-        validate_engines(self, pipelines, &engines, require_state).await
+        validate_engines(self, pipelines, &engines, require_state).await?;
+
+        Ok(engines)
     }
 
     async fn default_dedup(&self, engine: &Engine) -> Result<u64> {

@@ -107,7 +107,7 @@ impl RecoveryPlan {
             ("destination table", &spec.destination.table),
         ] {
             if !clickhouse_identifier(value) {
-                bail!("{name} must be a ClickHouse identifier")
+                bail!("{name} ({value}) must be a ClickHouse identifier")
             }
         }
         if manifest.backup.id.to_string() != spec.source.backup_id {

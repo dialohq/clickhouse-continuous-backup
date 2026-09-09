@@ -11,5 +11,6 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
         &config.timeouts,
     )?
     .require_target_engines(&config.pipelines)
-    .await
+    .await?;
+    Ok(())
 }

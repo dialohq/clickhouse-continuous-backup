@@ -63,8 +63,8 @@ pub async fn run(path: &std::path::Path) -> Result<()> {
         config.clickhouse_password.clone(),
         &config.timeouts,
     )?;
-    clickhouse.require_backup_engines(&config.pipelines).await?;
-    let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines);
+    let engines = clickhouse.require_backup_engines(&config.pipelines).await?;
+    let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines, &engines)?;
     snapshots.cleanup(&clickhouse).await?;
 
     let operation = create_backup(&config, &connect, &clickhouse, lease, &plan, &snapshots);

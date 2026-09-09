@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 use crate::{
     backup::{checkpoint, require_unchanged_keeper, resume_ingestion},
-    clickhouse::ClickHouse,
+    clickhouse::{ClickHouse, Engine, TableEngine},
     config::BackupConfig,
     connect::Connect,
     kafka::KafkaLog,
@@ -15,6 +15,7 @@ use crate::{
 struct SnapshotTable {
     database: String,
     source: String,
+    engine: Engine,
     snapshot: String,
 }
 
@@ -30,7 +31,11 @@ pub(crate) struct SnapshotLayout {
 }
 
 impl SnapshotLayout {
-    pub(crate) fn new(run_id: &str, pipelines: &[Pipeline]) -> Self {
+    pub(crate) fn new(
+        run_id: &str,
+        pipelines: &[Pipeline],
+        engines: &[TableEngine],
+    ) -> Result<Self> {
         let mut grouped = BTreeMap::<(String, String), Vec<Pipeline>>::new();
         for pipeline in pipelines {
             let key = (pipeline.database.clone(), pipeline.table.clone());
@@ -43,15 +48,24 @@ impl SnapshotLayout {
             .enumerate()
             .map(|(target_index, ((database, source), mut pipelines))| {
                 pipelines.sort_by(|left, right| left.connector.cmp(&right.connector));
+                let engine = engines
+                    .iter()
+                    .find(|eng| eng.database == database && eng.name == source)
+                    .ok_or(anyhow!(
+                        "Couldn't determine engine type of table to backup: {database}.{source}"
+                    ))?
+                    .engine
+                    .clone();
                 let target = SnapshotTable {
                     database,
+                    engine,
                     source,
                     snapshot: format!("__dcs_{run_id}_target_{target_index}"),
                 };
-                SnapshotGroup { pipelines, target }
+                Ok(SnapshotGroup { pipelines, target })
             })
-            .collect();
-        Self { groups }
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { groups })
     }
 
     pub(crate) async fn capture_immutable_snapshots_during_short_ingestion_pauses(
@@ -134,6 +148,11 @@ async fn pause_ingestion_and_capture_snapshot(
     let checkpoints = capture_checkpoints(connect, clickhouse, &group.pipelines).await?;
     kafka.require_offsets_replayable(&checkpoints)?;
     let table = &group.target;
+    if group.target.engine.is_replicated() {
+        clickhouse
+            .sync_replication(&table.database, &table.source)
+            .await?;
+    }
     clickhouse
         .clone_target(&table.database, &table.source, &table.snapshot)
         .await?;
@@ -205,6 +224,16 @@ mod tests {
         }
     }
 
+    fn table_engine(database: &str, name: &str, engine: &str) -> TableEngine {
+        serde_json::from_value(serde_json::json!({
+            "database": database,
+            "name": name,
+            "engine": engine,
+            "create_table_query": "",
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn groups_shared_targets_together() {
         let first = pipeline();
@@ -223,10 +252,55 @@ mod tests {
         let layout = SnapshotLayout::new(
             "00000000-0000-0000-0000-000000000001",
             &[first, shared, other],
-        );
+            &[
+                table_engine("records", "records", "ReplicatedMergeTree"),
+                table_engine("records", "other_records", "MergeTree"),
+            ],
+        )
+        .unwrap();
         assert_eq!(layout.groups.len(), 2);
         assert_eq!(layout.groups[0].pipelines.len(), 1);
+        assert_eq!(layout.groups[0].target.engine, Engine::MergeTree);
         assert_eq!(layout.groups[1].pipelines.len(), 2);
+        assert_eq!(layout.groups[1].target.engine, Engine::ReplicatedMergeTree);
         assert_eq!(layout.backup_objects().matches(" AS ").count(), 2);
+    }
+
+    #[test]
+    fn matches_engines_by_database_and_table() {
+        let first = pipeline();
+        let mut other_database = pipeline();
+        other_database.database = "other".to_owned();
+
+        let layout = SnapshotLayout::new(
+            "run",
+            &[first, other_database],
+            &[
+                table_engine("records", "records", "ReplicatedMergeTree"),
+                table_engine("other", "records", "ReplacingMergeTree"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(layout.groups.len(), 2);
+        assert_eq!(layout.groups[0].target.database, "other");
+        assert_eq!(layout.groups[0].target.engine, Engine::ReplacingMergeTree);
+        assert_eq!(layout.groups[1].target.database, "records");
+        assert_eq!(layout.groups[1].target.engine, Engine::ReplicatedMergeTree);
+    }
+
+    #[test]
+    fn rejects_missing_target_engine() {
+        let error = SnapshotLayout::new(
+            "run",
+            &[pipeline()],
+            &[
+                table_engine("other", "records", "ReplicatedMergeTree"),
+                table_engine("records", "records_state", "KeeperMap"),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("records.records"));
     }
 }
