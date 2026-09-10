@@ -66,7 +66,6 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
   "connectRequestSeconds" .Values.timeouts.connectRequestSeconds
   "connectPollSeconds" .Values.timeouts.connectPollSeconds
   "kafkaMetadataSeconds" .Values.timeouts.kafkaMetadataSeconds
-  "kafkaCatalogAcquireSeconds" .Values.timeouts.kafkaCatalogAcquireSeconds
   "kafkaCatalogReadSeconds" .Values.timeouts.kafkaCatalogReadSeconds
   "kafkaTransactionSeconds" .Values.timeouts.kafkaTransactionSeconds
   "kafkaMaxPollSeconds" .Values.timeouts.kafkaMaxPollSeconds

@@ -1,6 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use futures::{TryStreamExt, stream::try_unfold};
 use rdkafka::{
     ClientConfig, Message, Offset, TopicPartitionList,
     consumer::{Consumer, StreamConsumer},
@@ -9,7 +10,7 @@ use rdkafka::{
 
 use crate::{
     config::RuntimeTimeouts,
-    model::{BackupChainState, BackupManifest},
+    model::{BackupChain, BackupChainState, BackupManifest},
 };
 
 const CHAIN_STATE_KEY: &str = "__durable_clickhouse_sink_chain_state";
@@ -23,7 +24,11 @@ pub(crate) trait BackupMetadataStorage {
 }
 
 pub(crate) trait BackupMetadataLease {
-    fn chain_state(&self) -> Option<&BackupChainState>;
+    fn chain(&self) -> Option<&BackupChain>;
+
+    fn chain_state(&self) -> Option<&BackupChainState> {
+        self.chain().map(|chain| &chain.state)
+    }
 
     async fn commit(self, manifest: &BackupManifest, chain_state: &BackupChainState) -> Result<()>;
 }
@@ -36,7 +41,6 @@ pub(crate) struct KafkaBackupMetadataStorage {
     producer: FutureProducer,
     consumer: StreamConsumer,
     topic: String,
-    acquire_timeout: Duration,
     metadata_timeout: Duration,
     read_timeout: Duration,
     transaction_timeout: Duration,
@@ -83,14 +87,13 @@ impl KafkaBackupMetadataStorage {
             producer,
             consumer,
             topic,
-            acquire_timeout: timeouts.kafka_catalog_acquire,
             metadata_timeout: timeouts.kafka_metadata,
             read_timeout: timeouts.kafka_catalog_read,
             transaction_timeout: timeouts.kafka_transaction,
         })
     }
 
-    async fn read(&self, key: &str) -> Result<Option<String>> {
+    async fn read(&self, key: &str) -> Result<Option<BackupChain>> {
         let metadata = self
             .consumer
             .fetch_metadata(Some(&self.topic), self.metadata_timeout)?;
@@ -98,41 +101,85 @@ impl KafkaBackupMetadataStorage {
             bail!("Kafka did not return exactly one backup metadata topic")
         };
         if let Some(error) = topic.error() {
-            bail!("Kafka backup-metadata lookup failed: {error:?}")
+            let t = self.topic.clone();
+            bail!("Kafka backup-metadata lookup failed for topic {t}: {error:?}")
         }
         if topic.partitions().len() != 1 {
-            bail!("the Kafka backup metadata topic must have exactly one partition")
+            let l = topic.partitions().len();
+            bail!("the Kafka backup metadata topic must have exactly one partition, got: {l}")
         }
         self.consumer.subscribe(&[&self.topic])?;
-        let first = tokio::time::timeout(self.acquire_timeout, self.consumer.recv())
-            .await
-            .context("timed out acquiring exclusive backup metadata ownership")?;
         let (low, high) = self
             .consumer
             .fetch_watermarks(&self.topic, 0, self.metadata_timeout)?;
         if low < 0 || high < low {
             bail!("Kafka returned invalid backup-metadata watermarks: {low}..{high}")
         }
-        let mut value = None;
-        match first {
-            Ok(message) if inspect(&message, key, high, &mut value) => return Ok(value),
-            Ok(_) => {}
-            Err(rdkafka::error::KafkaError::PartitionEOF(_)) if high == 0 => return Ok(None),
-            Err(error) => return Err(error.into()),
-        }
-        loop {
-            match tokio::time::timeout(self.read_timeout, self.consumer.recv()).await {
-                Ok(Ok(message)) => {
-                    if inspect(&message, key, high, &mut value) {
-                        break;
+        let records = try_unfold(high == 0, move |done| async move {
+            if done {
+                return Ok::<_, anyhow::Error>(None);
+            }
+            let item = tokio::time::timeout(self.read_timeout, self.consumer.recv())
+                .await
+                .context("timed out acquiring exclusive backup metadata ownership")?;
+            match item {
+                Ok(msg) => {
+                    // high is exclusive, still have to check since offsets can be skipped
+                    // and records could be added since the check
+                    if msg.offset() >= high {
+                        return Ok(None);
                     }
+                    let done = msg.offset() + 1 >= high;
+                    Ok(Some((msg, done)))
                 }
-                Ok(Err(rdkafka::error::KafkaError::PartitionEOF(_))) => break,
-                Ok(Err(error)) => return Err(error.into()),
-                Err(_) => bail!("timed out reading Kafka backup metadata"),
+                Err(rdkafka::error::KafkaError::PartitionEOF(_)) => Ok(None),
+                Err(err) => bail!("Error reading messages from metadata topic-partition: {err}"),
+            }
+        })
+        .try_collect::<Vec<_>>()
+        .await?;
+
+        let Some(payload) = records
+            .iter()
+            .rev()
+            .find(|msg| msg.key() == Some(key.as_bytes()))
+            .and_then(|msg| msg.payload())
+        else {
+            return Ok(None);
+        };
+        let state: BackupChainState =
+            serde_json::from_slice(payload).context("Invalid backup chain state")?;
+
+        let mut chain: Vec<BackupManifest> = Vec::new();
+        let mut id = state.tip.id;
+        loop {
+            if chain.iter().any(|manifest| manifest.backup.id == id) {
+                bail!("Cycle in backup chain at {id}")
+            }
+            let manifest_key = id.to_string();
+            let payload = records
+                .iter()
+                .rev()
+                .find(|msg| msg.key() == Some(manifest_key.as_bytes()))
+                .and_then(|msg| msg.payload())
+                .with_context(|| format!("Missing backup manifest {id}"))?;
+            let manifest: BackupManifest =
+                serde_json::from_slice(payload).context("Invalid backup manifest")?;
+            if manifest.backup.id != id {
+                bail!("Backup manifest ID does not match catalog key {id}")
+            }
+            let parent = manifest.backup.parent.as_ref().map(|parent| parent.id);
+            chain.push(manifest);
+            match parent {
+                Some(parent) => id = parent,
+                None => {
+                    return Ok(Some(BackupChain {
+                        state,
+                        manifests: chain,
+                    }));
+                }
             }
         }
-        Ok(value)
     }
 
     async fn publish(&self, records: &[(&str, &str)]) -> Result<()> {
@@ -163,28 +210,24 @@ impl KafkaBackupMetadataStorage {
 
 pub(crate) struct KafkaBackupMetadataLease<'a> {
     storage: &'a KafkaBackupMetadataStorage,
-    chain_state: Option<BackupChainState>,
+    manifest_chain: Option<BackupChain>,
 }
 
 impl BackupMetadataStorage for KafkaBackupMetadataStorage {
     type Lease<'a> = KafkaBackupMetadataLease<'a>;
 
     async fn acquire(&self) -> Result<Self::Lease<'_>> {
-        let chain_state = self
-            .read(CHAIN_STATE_KEY)
-            .await?
-            .map(|value| serde_json::from_str(&value).context("invalid backup chain state"))
-            .transpose()?;
+        let chain_state = self.read(CHAIN_STATE_KEY).await?;
         Ok(KafkaBackupMetadataLease {
             storage: self,
-            chain_state,
+            manifest_chain: chain_state,
         })
     }
 }
 
 impl BackupMetadataLease for KafkaBackupMetadataLease<'_> {
-    fn chain_state(&self) -> Option<&BackupChainState> {
-        self.chain_state.as_ref()
+    fn chain(&self) -> Option<&BackupChain> {
+        self.manifest_chain.as_ref()
     }
 
     async fn commit(self, manifest: &BackupManifest, chain_state: &BackupChainState) -> Result<()> {
@@ -199,7 +242,6 @@ impl BackupMetadataLease for KafkaBackupMetadataLease<'_> {
             .await
     }
 }
-
 pub(crate) struct KafkaBackupMetadataReader {
     consumer: StreamConsumer,
     topic: String,

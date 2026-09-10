@@ -1,15 +1,11 @@
-{pkgs, system, backup, nix2container}: let
+{
+  pkgs,
+  system,
+  backup,
+  nix2container,
+}: let
   n2c = nix2container.packages.${system}.nix2container;
-  connector = pkgs.runCommand "clickhouse-kafka-connect-1.5.0" {
-    src = pkgs.fetchurl {
-      url = "https://github.com/ClickHouse/clickhouse-kafka-connect/releases/download/v1.5.0/clickhouse-kafka-connect-v1.5.0.zip";
-      hash = "sha256-U+MczZZzS4+x8lEnnaF4Y7mxk/B2SmEoBGGqMUBQ7MY=";
-    };
-    nativeBuildInputs = [pkgs.unzip];
-  } ''
-    mkdir -p $out/plugins/clickhouse
-    unzip -q $src -d $out/plugins/clickhouse
-  '';
+  connector = pkgs.callPackage ./clickhouse-kafka-connect.nix {};
 in {
   connect = n2c.buildImage {
     name = "ghcr.io/dialohq/durable-clickhouse-connect";

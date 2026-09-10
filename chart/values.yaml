@@ -49,7 +49,6 @@ timeouts:
   connectRequestSeconds: 15
   connectPollSeconds: 1
   kafkaMetadataSeconds: 15
-  kafkaCatalogAcquireSeconds: 30
   kafkaCatalogReadSeconds: 15
   kafkaTransactionSeconds: 30
   kafkaMaxPollSeconds: 86400
@@ -60,7 +59,7 @@ timeouts:
 
 topics:
   manage: true
-  partitions: 6
+  partitions: 3
 
 backup:
   enabled: false
@@ -103,7 +102,7 @@ pipelines: []
 #   table: records
 #   database: default
 #   retentionMs: 7776000000
-#   partitions: 6
+#   partitions: 3
 #   valueConverter: org.apache.kafka.connect.json.JsonConverter
 #   valueConverterSchemasEnable: false
 #   connectorConfig: {}

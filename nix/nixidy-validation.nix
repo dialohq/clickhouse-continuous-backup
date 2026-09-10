@@ -20,11 +20,13 @@
           credentialsSecret.name = "clickhouse-backup-credentials";
         };
         recovery.credentialsSecret.name = "clickhouse-recovery-credentials";
-        pipelines = [{
-          name = "records";
-          topic = "records.input";
-          table = "records";
-        }];
+        pipelines = [
+          {
+            name = "records";
+            topic = "records.input";
+            table = "records";
+          }
+        ];
       };
     };
   };
