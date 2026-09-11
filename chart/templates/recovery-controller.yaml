@@ -1,0 +1,94 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["chbackup.dialo.ai"]
+    resources: ["tablerecoveries"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["chbackup.dialo.ai"]
+    resources: ["tablerecoveries/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "durable-clickhouse-sink.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: recovery-controller
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: recovery-controller
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
+        app.kubernetes.io/component: recovery-controller
+    spec:
+      serviceAccountName: {{ include "durable-clickhouse-sink.fullname" . }}
+      automountServiceAccountToken: true
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 14 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+          imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+          command: ["/bin/durable-clickhouse-backup", "recovery-controller", "/etc/durable-clickhouse/recovery.json"]
+          resources:
+            {{- toYaml .Values.recovery.resources | nindent 18 }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
+            - {name: clickhouse-recovery-credentials, mountPath: /etc/clickhouse-recovery, readOnly: true}
+            {{- if .Values.kafka.existingSecret }}
+            - {name: kafka-recovery-client, mountPath: /etc/kafka-recovery, readOnly: true}
+            {{- end }}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+        - name: runtime-config
+          configMap:
+            name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+        - name: clickhouse-recovery-credentials
+          secret:
+            secretName: {{ .Values.recovery.credentialsSecret.name }}
+            items:
+              - key: {{ .Values.recovery.credentialsSecret.propertiesKey }}
+                path: clickhouse.properties
+        {{- if .Values.kafka.existingSecret }}
+        - name: kafka-recovery-client
+          secret:
+            secretName: {{ .Values.kafka.existingSecret }}
+            items:
+              - key: {{ .Values.backup.kafkaPropertiesKey }}
+                path: client.properties
+        {{- end }}

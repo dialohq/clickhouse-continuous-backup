@@ -1,0 +1,8 @@
+Durable ClickHouse Sink is configured for {{ len .Values.pipelines }} pipeline(s).
+
+The chart expects:
+- Kafka at {{ .Values.kafka.bootstrapServers }}
+- ClickHouse at {{ .Values.clickhouse.host }}:{{ .Values.clickhouse.port }}
+- ClickHouse credentials in Secret {{ .Values.clickhouse.credentialsSecret.name }}
+
+Target ClickHouse tables must exist before connector registration completes.

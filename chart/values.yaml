@@ -1,0 +1,115 @@
+nameOverride: ""
+fullnameOverride: ""
+imagePullSecrets: []
+stateNamespace: default
+serviceAccount:
+  annotations: {}
+
+kafka:
+  bootstrapServers: ""
+  existingSecret: ""
+  propertiesKey: client.properties
+  replicationFactor: 3
+  internalTopicReplicationFactor: 3
+
+clickhouse:
+  host: ""
+  port: 8443
+  secure: true
+  database: default
+  credentialsSecret:
+    name: ""
+    propertiesKey: clickhouse.properties
+
+connect:
+  image:
+    repository: ghcr.io/dialohq/durable-clickhouse-connect
+    tag: 0.1.0
+    pullPolicy: IfNotPresent
+  podAnnotations: {}
+  replicas: 2
+  tasksMax: 1
+  # Error handling shared by all pipeline connectors.
+  errors:
+    tolerance: all
+    deadLetterQueue:
+      topicName: deadletterqueue
+      replicationFactor: 3
+      contextHeadersEnable: true
+  deleteConnectorsOnUninstall: true
+  readinessProbe:
+    periodSeconds: 5
+    failureThreshold: 30
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 15
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
+timeouts:
+  clickhouseConnectSeconds: 10
+  connectConnectSeconds: 5
+  connectRequestSeconds: 15
+  connectPollSeconds: 1
+  kafkaMetadataSeconds: 15
+  kafkaCatalogReadSeconds: 15
+  kafkaTransactionSeconds: 30
+  kafkaMaxPollSeconds: 86400
+  kafkaReplayPollSeconds: 15
+  recoveryCatchupSeconds: 3600
+  controllerRetrySeconds: 15
+  hookJobSeconds: 600
+
+topics:
+  manage: true
+  partitions: 3
+
+backup:
+  enabled: false
+  schedule: "17 2 * * *"
+  suspend: false
+  namedCollection: durable_clickhouse_backups
+  pathPrefix: durable-clickhouse-sink
+  archiveExtension: tar.zst
+  maxIncrementalsPerFull: 0
+  maxBandwidthBytesPerSecond: 0
+  pauseTimeoutSeconds: 120
+  activeDeadlineSeconds: 21600
+  terminationGracePeriodSeconds: 300
+  catalogTopic: ""
+  kafkaPropertiesKey: librdkafka.properties
+  credentialsSecret:
+    name: ""
+    usernameKey: username
+    passwordKey: password
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+recovery:
+  credentialsSecret:
+    name: ""
+    propertiesKey: clickhouse.properties
+  replayTopicReplicationFactor: 3
+  replayTopicRetentionMs: 604800000
+  replayBatchRecords: 500
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+pipelines: []
+# - name: records
+#   topic: records.input
+#   table: records
+#   database: default
+#   retentionMs: 7776000000
+#   partitions: 3
+#   valueConverter: org.apache.kafka.connect.json.JsonConverter
+#   valueConverterSchemasEnable: false
+#   connectorConfig: {}

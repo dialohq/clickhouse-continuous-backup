@@ -4,6 +4,7 @@
 /result
 /result-*
 /build/
+/backup/target/
 *.iml
 .idea/
-
+.dnvr

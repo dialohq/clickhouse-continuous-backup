@@ -1,0 +1,136 @@
+# Durable ClickHouse Sink
+
+Durable ClickHouse Sink is a Helm chart for append-only delivery from a
+Kafka-compatible log to ClickHouse, with coordinated incremental backup and
+exact backup checkpoints. It installs neither Kafka nor ClickHouse.
+
+```text
+Kafka topic -> official ClickHouse Kafka Connect sink -> ClickHouse
+                                                        |
+                                  backup + backup manifest
+```
+
+The official ClickHouse connector uses deterministic retries and KeeperMap
+state at the Kafka-to-ClickHouse boundary. Target tables can remain ordinary
+`MergeTree` or `ReplicatedMergeTree` tables and do not need query-time `FINAL`.
+
+## Requirements
+
+- a Kafka-protocol-compatible cluster;
+- ClickHouse with ClickHouse Keeper and the `KeeperMap` engine enabled;
+- pre-created target databases and tables;
+- persistent Kafka input and Connect internal topics;
+- an S3-compatible ClickHouse named collection when backups are enabled.
+
+## Build and install
+
+The Helm chart is checked in under `chart/`. Nix packages the chart and image,
+defines the E2E environment, and uses Nixidy to render the chart during
+validation.
+
+```bash
+helm upgrade --install durable ./chart \
+  --namespace durable-clickhouse-sink \
+  --create-namespace \
+  --values values.yaml
+```
+
+`nix build .#chart` remains available when a packaged chart archive is needed.
+
+Minimal values:
+
+```yaml
+stateNamespace: production
+
+kafka:
+  bootstrapServers: redpanda.kafka.svc:9093
+  existingSecret: durable-kafka-client
+
+clickhouse:
+  host: clickhouse.example.internal
+  port: 8443
+  secure: true
+  database: durable_data
+  credentialsSecret:
+    name: durable-clickhouse-writer
+
+pipelines:
+  - name: records
+    topic: durable.records
+    table: records
+    retentionMs: 7776000000
+```
+
+Connector error handling is configured through `connect.errors`. These defaults
+apply to every pipeline connector:
+
+```yaml
+connect:
+  errors:
+    tolerance: all
+    deadLetterQueue:
+      topicName: deadletterqueue
+      replicationFactor: 3
+      contextHeadersEnable: true
+```
+
+These values map to `errors.tolerance`, `errors.deadletterqueue.topic.name`,
+`errors.deadletterqueue.topic.replication.factor`, and
+`errors.deadletterqueue.context.headers.enable` in the connector configuration.
+With `tolerance: all`, errors handled by Kafka Connect's error-tolerance
+mechanism can skip the affected records and report them to the dead-letter
+queue instead of delivering them to the target table. Set `tolerance: none`
+to fail on those errors. `topicName: ""` disables the dead-letter queue;
+`replicationFactor` controls its creation replication factor, and
+`contextHeadersEnable` adds error context to dead-letter records' headers.
+Configure these four settings here rather than in a pipeline's
+`connectorConfig`, which rejects duplicate error-handling settings.
+
+Optional scheduled backups use a ClickHouse S3 named collection configured on
+the ClickHouse servers. Ceph RGW and MinIO use the same interface.
+
+```yaml
+backup:
+  enabled: true
+  schedule: "17 2 * * *"
+  namedCollection: durable_clickhouse_backups
+  pathPrefix: durable-data/production
+  maxIncrementalsPerFull: 6
+  maxBandwidthBytesPerSecond: 0
+  credentialsSecret:
+    name: durable-clickhouse-backup
+    usernameKey: username
+    passwordKey: password
+```
+
+Network, Kafka, polling, hook, and backup deadlines have chart defaults under
+`timeouts` and `backup`. Override them for the deployment's latency and backup
+size; the backup binary does not carry fallback durations of its own.
+
+Each backup Job briefly pauses all connectors writing one physical table,
+creates a copy-on-write target-table clone, captures and verifies their
+KeeperMap state, and resumes them. Compression and S3 upload operate on the
+immutable clones while ingestion is running. The manifest stores the exact
+KeeperMap rows and Kafka offsets. Target tables use one full backup followed by
+at most `maxIncrementalsPerFull` incrementals; `0` is the full-only default.
+
+The immutable `stateNamespace`, release name, pipeline names, topic names, and
+Kafka Connect internal topics identify delivery and backup state. Do not rename
+them as a routine Helm change.
+
+## Documentation
+
+- [Architecture and failure boundaries](docs/architecture.md)
+- [Guarantees](docs/guarantees.md)
+- [Failure modes and unhandled boundaries](docs/failure-modes.md)
+- [Schema contract](docs/schema.md)
+- [Authentication and credential rotation](docs/authentication.md)
+- [Declarative table recovery and point-in-time replay](docs/table-recovery.md)
+- [Backup procedure](docs/backup-procedure.md)
+- [Test plan](docs/testing.md)
+- [External design references](docs/references.md)
+
+## Status
+
+This repository remains private while its security and operational contracts
+are reviewed. It is intended to become an Apache-2.0 licensed OSS project.

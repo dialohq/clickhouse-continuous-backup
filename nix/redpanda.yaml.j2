@@ -1,0 +1,22 @@
+redpanda:
+  data_directory: {{ data_dir | tojson }}
+  node_id: 0
+  seed_servers: []
+  rpc_server:
+    address: {{ listen_host | tojson }}
+    port: {{ rpc_port }}
+  advertised_rpc_api:
+    address: {{ listen_host | tojson }}
+    port: {{ rpc_port }}
+  kafka_api:
+    - name: internal
+      address: {{ listen_host | tojson }}
+      port: {{ kafka_port }}
+  advertised_kafka_api:
+    - name: internal
+      address: {{ listen_host | tojson }}
+      port: {{ kafka_port }}
+  admin:
+    - address: {{ listen_host | tojson }}
+      port: {{ admin_port }}
+  developer_mode: true
