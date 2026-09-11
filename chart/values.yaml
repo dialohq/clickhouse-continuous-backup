@@ -29,6 +29,13 @@ connect:
   podAnnotations: {}
   replicas: 2
   tasksMax: 1
+  # Error handling shared by all pipeline connectors.
+  errors:
+    tolerance: all
+    deadLetterQueue:
+      topicName: deadletterqueue
+      replicationFactor: 3
+      contextHeadersEnable: true
   deleteConnectorsOnUninstall: true
   readinessProbe:
     periodSeconds: 5

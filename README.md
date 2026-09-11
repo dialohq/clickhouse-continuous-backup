@@ -61,6 +61,31 @@ pipelines:
     retentionMs: 7776000000
 ```
 
+Connector error handling is configured through `connect.errors`. These defaults
+apply to every pipeline connector:
+
+```yaml
+connect:
+  errors:
+    tolerance: all
+    deadLetterQueue:
+      topicName: deadletterqueue
+      replicationFactor: 3
+      contextHeadersEnable: true
+```
+
+These values map to `errors.tolerance`, `errors.deadletterqueue.topic.name`,
+`errors.deadletterqueue.topic.replication.factor`, and
+`errors.deadletterqueue.context.headers.enable` in the connector configuration.
+With `tolerance: all`, errors handled by Kafka Connect's error-tolerance
+mechanism can skip the affected records and report them to the dead-letter
+queue instead of delivering them to the target table. Set `tolerance: none`
+to fail on those errors. `topicName: ""` disables the dead-letter queue;
+`replicationFactor` controls its creation replication factor, and
+`contextHeadersEnable` adds error context to dead-letter records' headers.
+Configure these four settings here rather than in a pipeline's
+`connectorConfig`, which rejects duplicate error-handling settings.
+
 Optional scheduled backups use a ClickHouse S3 named collection configured on
 the ClickHouse servers. Ceph RGW and MinIO use the same interface.
 

@@ -1,6 +1,7 @@
 {{- $names := dict -}}
 {{- $topics := dict -}}
-{{- $reserved := list "connector.class" "tasks.max" "topics" "topics.regex" "topic2TableMap" "hostname" "port" "ssl" "database" "username" "password" "exactlyOnce" "errors.tolerance" "bufferCount" "consumer.override.group.id" "consumer.override.isolation.level" "zkPath" "zkDatabase" -}}
+{{- $errorSettings := list "errors.tolerance" "errors.deadletterqueue.topic.name" "errors.deadletterqueue.topic.replication.factor" "errors.deadletterqueue.context.headers.enable" -}}
+{{- $reserved := list "connector.class" "tasks.max" "topics" "topics.regex" "topic2TableMap" "hostname" "port" "ssl" "database" "username" "password" "exactlyOnce" "bufferCount" "consumer.override.group.id" "consumer.override.isolation.level" "zkPath" "zkDatabase" -}}
 {{- range $pipeline := .Values.pipelines }}
 {{- if hasKey $names $pipeline.name }}
 {{- fail (printf "pipeline names must be unique: %s" $pipeline.name) }}
@@ -11,6 +12,9 @@
 {{- end }}
 {{- $_ := set $topics $pipeline.topic true }}
 {{- range $key, $_ := default dict $pipeline.connectorConfig }}
+{{- if has $key $errorSettings }}
+{{- fail (printf "pipeline %s must configure %s through connect.errors instead of connectorConfig" $pipeline.name $key) }}
+{{- end }}
 {{- if has $key $reserved }}
 {{- fail (printf "pipeline %s cannot override safety-critical connector setting %s" $pipeline.name $key) }}
 {{- end }}

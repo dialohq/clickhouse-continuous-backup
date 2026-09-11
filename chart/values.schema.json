@@ -3,6 +3,32 @@
   "type": "object",
   "required": ["kafka", "clickhouse", "timeouts", "recovery", "pipelines"],
   "properties": {
+    "connect": {
+      "type": "object",
+      "required": ["errors"],
+      "properties": {
+        "errors": {
+          "type": "object",
+          "required": ["tolerance", "deadLetterQueue"],
+          "properties": {
+            "tolerance": {"type": "string", "enum": ["all", "none"]},
+            "deadLetterQueue": {
+              "type": "object",
+              "required": ["topicName", "replicationFactor", "contextHeadersEnable"],
+              "properties": {
+                "topicName": {
+                  "type": "string",
+                  "pattern": "^$|^[A-Za-z0-9._-]+$",
+                  "maxLength": 249
+                },
+                "replicationFactor": {"type": "integer", "minimum": 1},
+                "contextHeadersEnable": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    },
     "stateNamespace": {
       "type": "string",
       "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
