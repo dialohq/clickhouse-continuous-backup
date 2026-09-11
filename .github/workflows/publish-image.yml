@@ -13,11 +13,12 @@ jobs:
     runs-on: nixos
     steps:
       - uses: actions/checkout@v5
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push image
-        run: nix run .#connectImage.copyToRegistry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_AUTH_FILE: ${{ runner.temp }}/durable-clickhouse-registry-auth.json
+        run: |
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          printf '%s' "$GITHUB_TOKEN" | nix run --inputs-from . nixpkgs#skopeo -- \
+            login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          nix run .#connectImage.copyToRegistry
