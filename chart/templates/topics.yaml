@@ -22,7 +22,6 @@ spec:
         app.kubernetes.io/component: topic-manager
     spec:
       restartPolicy: OnFailure
-      automountServiceAccountToken: false
       securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
       containers:
         - name: topics
@@ -63,7 +62,7 @@ spec:
       volumes:
         - {name: tmp, emptyDir: {}}
         {{- if $.Values.kafka.existingSecret }}
-        {{- include "durable-clickhouse-sink.kafkaSecretVolume" $ | nindent 6 }}
+        {{- include "durable-clickhouse-sink.kafkaSecretVolume" $ | nindent 8 }}
         {{- end }}
 ---
 {{- end }}
@@ -90,7 +89,6 @@ spec:
         app.kubernetes.io/component: topic-manager
     spec:
       restartPolicy: OnFailure
-      automountServiceAccountToken: false
       securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
       containers:
         - name: topic
@@ -116,6 +114,6 @@ spec:
             {{- end }}
       volumes:
         - {name: tmp, emptyDir: {}}
-        {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 6 }}
+        {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 8 }}
 ---
 {{- end }}

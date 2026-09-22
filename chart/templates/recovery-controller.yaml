@@ -24,7 +24,7 @@ roleRef:
   name: {{ include "durable-clickhouse-sink.fullname" . }}-recovery
 subjects:
   - kind: ServiceAccount
-    name: {{ include "durable-clickhouse-sink.fullname" . }}
+    name: {{ default (include "durable-clickhouse-sink.fullname" .) .Values.recovery.serviceAccountName }}
     namespace: {{ .Release.Namespace }}
 ---
 apiVersion: apps/v1
@@ -47,9 +47,12 @@ spec:
       labels:
         {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
         app.kubernetes.io/component: recovery-controller
+      {{- with .Values.recovery.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
-      serviceAccountName: {{ include "durable-clickhouse-sink.fullname" . }}
-      automountServiceAccountToken: true
+      serviceAccountName: {{ default (include "durable-clickhouse-sink.fullname" .) .Values.recovery.serviceAccountName }}
       securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -69,7 +72,9 @@ spec:
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
             - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
+            {{- if .Values.recovery.credentialsSecret.name }}
             - {name: clickhouse-recovery-credentials, mountPath: /etc/clickhouse-recovery, readOnly: true}
+            {{- end }}
             {{- if .Values.kafka.existingSecret }}
             - {name: kafka-recovery-client, mountPath: /etc/kafka-recovery, readOnly: true}
             {{- end }}
@@ -78,12 +83,14 @@ spec:
         - name: runtime-config
           configMap:
             name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+        {{- if .Values.recovery.credentialsSecret.name }}
         - name: clickhouse-recovery-credentials
           secret:
             secretName: {{ .Values.recovery.credentialsSecret.name }}
             items:
               - key: {{ .Values.recovery.credentialsSecret.propertiesKey }}
                 path: clickhouse.properties
+        {{- end }}
         {{- if .Values.kafka.existingSecret }}
         - name: kafka-recovery-client
           secret:

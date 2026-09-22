@@ -8,7 +8,7 @@ data:
   target.json: |
     {
       "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
-      "clickhousePropertiesFile": "/etc/clickhouse/clickhouse.properties",
+      "clickhousePropertiesFile": {{ default "/etc/clickhouse/clickhouse.properties" .Values.clickhouse.credentialsFile | quote }},
       "pipelines": {{ include "durable-clickhouse-sink.backupPipelines" . }},
       "timeouts": {{ include "durable-clickhouse-sink.runtimeTimeouts" . }}
     }
@@ -17,6 +17,9 @@ data:
       "connectUrl": "http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083",
       "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
       "namedCollection": {{ .Values.backup.namedCollection | quote }},
+      {{- if .Values.backup.credentialsFile }}
+      "clickhousePropertiesFile": {{ .Values.backup.credentialsFile | quote }},
+      {{- end }}
       "pathPrefix": {{ trimSuffix "/" .Values.backup.pathPrefix | quote }},
       "archiveExtension": {{ .Values.backup.archiveExtension | quote }},
       "pauseTimeoutSeconds": {{ .Values.backup.pauseTimeoutSeconds }},
@@ -32,7 +35,7 @@ data:
     {
       "connectUrl": "http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083",
       "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
-      "clickhousePropertiesFile": "/etc/clickhouse-recovery/clickhouse.properties",
+      "clickhousePropertiesFile": {{ default "/etc/clickhouse-recovery/clickhouse.properties" .Values.recovery.credentialsFile | quote }},
       "clickhouseConnectorHost": {{ .Values.clickhouse.host | quote }},
       "clickhouseConnectorPort": {{ .Values.clickhouse.port }},
       "clickhouseConnectorSecure": {{ .Values.clickhouse.secure }},

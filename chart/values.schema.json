@@ -7,6 +7,8 @@
       "type": "object",
       "required": ["errors"],
       "properties": {
+        "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "serviceAccountName": {"type": "string"},
         "errors": {
           "type": "object",
           "required": ["tolerance", "deadLetterQueue"],
@@ -53,14 +55,22 @@
         "port": {"type": "integer", "minimum": 1, "maximum": 65535},
         "secure": {"type": "boolean"},
         "database": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+        "credentialsFile": {"type": "string", "pattern": "^$|^/[^:\r\n]+$"},
         "credentialsSecret": {
           "type": "object",
           "required": ["name", "propertiesKey"],
           "properties": {
-            "name": {"type": "string", "minLength": 1},
+            "name": {"type": "string"},
             "propertiesKey": {"type": "string", "minLength": 1}
           }
         }
+      }
+    },
+    "registration": {
+      "type": "object",
+      "properties": {
+        "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "serviceAccountName": {"type": "string"}
       }
     },
     "pipelines": {
@@ -124,6 +134,9 @@
     "backup": {
       "type": "object",
       "properties": {
+        "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "serviceAccountName": {"type": "string"},
+        "credentialsFile": {"type": "string", "pattern": "^$|^/[^:\r\n]+$"},
         "enabled": {"type": "boolean"},
         "schedule": {"type": "string", "minLength": 1},
         "suspend": {"type": "boolean"},
@@ -165,11 +178,14 @@
         "replayBatchRecords"
       ],
       "properties": {
+        "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "serviceAccountName": {"type": "string"},
+        "credentialsFile": {"type": "string", "pattern": "^$|^/[^:\r\n]+$"},
         "credentialsSecret": {
           "type": "object",
           "required": ["name", "propertiesKey"],
           "properties": {
-            "name": {"type": "string", "minLength": 1},
+            "name": {"type": "string"},
             "propertiesKey": {"type": "string", "minLength": 1}
           }
         },

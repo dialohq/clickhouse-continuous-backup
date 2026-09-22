@@ -17,6 +17,9 @@ clickhouse:
   port: 8443
   secure: true
   database: default
+  # Existing username/password properties file, e.g. rendered by Vault Agent.
+  # Set either credentialsFile or credentialsSecret.name.
+  credentialsFile: ""
   credentialsSecret:
     name: ""
     propertiesKey: clickhouse.properties
@@ -27,6 +30,8 @@ connect:
     tag: 0.1.0
     pullPolicy: IfNotPresent
   podAnnotations: {}
+  # Existing account; defaults to the chart's account.
+  serviceAccountName: ""
   replicas: 2
   tasksMax: 1
   # Error handling shared by all pipeline connectors.
@@ -64,12 +69,21 @@ timeouts:
   controllerRetrySeconds: 15
   hookJobSeconds: 600
 
+registration:
+  # Preflight reads clickhouse.credentialsFile; Vault must inject before that init container.
+  podAnnotations: {}
+  serviceAccountName: ""
+
 topics:
   manage: true
   partitions: 3
 
 backup:
   enabled: false
+  podAnnotations: {}
+  serviceAccountName: ""
+  # Same properties format as clickhouse.credentialsFile; alternative to credentialsSecret.name.
+  credentialsFile: ""
   schedule: "17 2 * * *"
   suspend: false
   namedCollection: durable_clickhouse_backups
@@ -90,6 +104,10 @@ backup:
   failedJobsHistoryLimit: 3
 
 recovery:
+  podAnnotations: {}
+  serviceAccountName: ""
+  # Same properties format as clickhouse.credentialsFile; alternative to credentialsSecret.name.
+  credentialsFile: ""
   credentialsSecret:
     name: ""
     propertiesKey: clickhouse.properties
