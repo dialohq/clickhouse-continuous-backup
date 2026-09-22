@@ -40,8 +40,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      serviceAccountName: {{ include "durable-clickhouse-sink.fullname" . }}
-      automountServiceAccountToken: false
+      serviceAccountName: {{ default (include "durable-clickhouse-sink.fullname" .) .Values.connect.serviceAccountName }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -95,9 +94,11 @@ spec:
           volumeMounts:
             - name: connect-work
               mountPath: /etc/durable-clickhouse
+            {{- if .Values.clickhouse.credentialsSecret.name }}
             - name: clickhouse-credentials
               mountPath: /etc/clickhouse
               readOnly: true
+            {{- end }}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: connect-config
@@ -105,11 +106,13 @@ spec:
             name: {{ include "durable-clickhouse-sink.fullname" . }}-connect
         - name: connect-work
           emptyDir: {}
+        {{- if .Values.clickhouse.credentialsSecret.name }}
         - name: clickhouse-credentials
           secret:
             secretName: {{ .Values.clickhouse.credentialsSecret.name }}
             items:
               - key: {{ .Values.clickhouse.credentialsSecret.propertiesKey }}
                 path: clickhouse.properties
+        {{- end }}
         - {name: tmp, emptyDir: {}}
-        {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 6 }}
+        {{- include "durable-clickhouse-sink.kafkaSecretVolume" . | nindent 8 }}

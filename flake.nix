@@ -79,6 +79,8 @@
           helm lint --strict ${packages.chartSource} "''${chart_args[@]}"
           helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
           helm template test ${packages.chartSource} "''${chart_args[@]}" \
+            --set-string kafka.existingSecret=kafka-credentials > /dev/null
+          helm template test ${packages.chartSource} "''${chart_args[@]}" \
             --set backup.enabled=false > rendered-without-backups.yaml
           helm template test ${packages.chartSource} "''${chart_args[@]}" \
             --set-string 'pipelines[1].name=other' \
@@ -101,6 +103,14 @@
           expect_rejected --set recovery.replayTopicReplicationFactor=0
           expect_rejected --set recovery.replayTopicRetentionMs=0
           expect_rejected --set recovery.replayBatchRecords=0
+          for component in clickhouse backup recovery; do
+            expect_rejected --set-string "$component.credentialsSecret.name="
+            expect_rejected --set-string "$component.credentialsFile=/vault/secrets/clickhouse.properties"
+            expect_rejected --set-string "$component.credentialsSecret.name=" \
+              --set-string "$component.credentialsFile=relative/path"
+            expect_rejected --set-string "$component.credentialsSecret.name=" \
+              --set-string "$component.credentialsFile=/invalid:path"
+          done
           expect_rejected --set-string "backup.pathPrefix=invalid')"
           expect_rejected --set-string 'backup.pathPrefix=valid/../escape'
           expect_rejected --set-string 'pipelines[1].name=records' \

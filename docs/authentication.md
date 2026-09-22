@@ -1,6 +1,7 @@
 # Authentication and credential rotation
 
-The chart consumes existing Kubernetes Secrets and does not create credentials.
+The chart consumes existing Kubernetes Secrets or injected ClickHouse credential
+files and does not create credentials.
 This keeps it compatible with Vault, External Secrets, Sealed Secrets, SOPS, or
 an operator-specific secret controller.
 
@@ -87,6 +88,24 @@ collection may use fixed access keys for a test such as MinIO, environment or
 instance credentials where supported, or credentials managed by the
 ClickHouse deployment.
 
+## Vault Agent injection
+
+Set `clickhouse.credentialsFile`, `backup.credentialsFile`, and
+`recovery.credentialsFile` to the injected paths. Files contain `username=...`
+and `password=...`, one per line. Set exactly one of `credentialsFile` or
+`credentialsSecret.name` for each component (backup only when enabled).
+Use single-line values without backslashes or leading/trailing whitespace.
+
+Configure `podAnnotations` and `serviceAccountName` under `connect`,
+`registration`, `backup`, and `recovery`. The accounts and Vault roles must exist.
+Vault supplies the volumes and containers; template annotations pass through
+literally. Registration uses `clickhouse.credentialsFile` and needs Vault's
+`agent-init-first: "true"`. Use `agent-pre-populate-only: "true"` for registration
+and backup so Jobs finish; their leases must cover the Job duration. Injected
+files must be readable by UID 65532. Credential reloads are not implemented.
+Kafka continues to use `kafka.existingSecret`; S3 authentication belongs to the
+ClickHouse server's named collection.
+
 ## Rotation boundary
 
 A new CronJob pod reads current Kafka and ClickHouse Secret values, so rotating
@@ -106,7 +125,7 @@ Short-lived credentials are safe only when the external issuer, Secret sync,
 and restart controller are tested together. Prefer renewable credentials whose
 lease comfortably exceeds the maximum restart and incident-recovery time.
 
-The recovery controller is the only workload that mounts a Kubernetes service
-account token. Its namespaced Role can read `TableRecovery` objects and update
-only their status subresource. Connect, topic jobs, and backup jobs keep service
-account token automount disabled.
+The chart leaves service account token mounting to Kubernetes defaults. An
+existing service account must allow token mounting for Vault authentication.
+The recovery controller's namespaced Role can read `TableRecovery` objects and
+update only their status subresource.

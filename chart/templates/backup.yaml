@@ -21,9 +21,15 @@ spec:
           labels:
             {{- include "durable-clickhouse-sink.labels" . | nindent 12 }}
             app.kubernetes.io/component: backup
+          {{- with .Values.backup.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
         spec:
           restartPolicy: Never
-          automountServiceAccountToken: false
+          {{- with .Values.backup.serviceAccountName }}
+          serviceAccountName: {{ . }}
+          {{- end }}
           terminationGracePeriodSeconds: {{ .Values.backup.terminationGracePeriodSeconds }}
           securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
           containers:
@@ -36,6 +42,7 @@ spec:
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.uid
+                {{- if .Values.backup.credentialsSecret.name }}
                 - name: CLICKHOUSE_USERNAME
                   valueFrom:
                     secretKeyRef:
@@ -46,6 +53,7 @@ spec:
                     secretKeyRef:
                       name: {{ .Values.backup.credentialsSecret.name }}
                       key: {{ .Values.backup.credentialsSecret.passwordKey }}
+                {{- end }}
               volumeMounts:
                 - {name: tmp, mountPath: /tmp}
                 - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}

@@ -20,11 +20,13 @@
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if and .Values.backup.enabled (not .Values.backup.credentialsSecret.name) }}
-{{- fail "backup.credentialsSecret.name is required when backups are enabled" }}
+{{- range $name := list "clickhouse" "backup" "recovery" }}
+{{- $config := index $.Values $name }}
+{{- if or (ne $name "backup") $.Values.backup.enabled }}
+{{- if eq (empty $config.credentialsFile) (empty $config.credentialsSecret.name) }}
+{{- fail (printf "set exactly one of %s.credentialsFile or %s.credentialsSecret.name" $name $name) }}
 {{- end }}
-{{- if not .Values.recovery.credentialsSecret.name }}
-{{- fail "recovery.credentialsSecret.name is required" }}
+{{- end }}
 {{- end }}
 {{- $minimumResumeGrace := mul (len .Values.pipelines) (int .Values.timeouts.connectRequestSeconds) }}
 {{- if le (int .Values.backup.terminationGracePeriodSeconds) (int $minimumResumeGrace) }}

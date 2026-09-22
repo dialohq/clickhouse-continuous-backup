@@ -22,8 +22,8 @@ data:
       "errors.deadletterqueue.topic.name": {{ $.Values.connect.errors.deadLetterQueue.topicName | quote }},
       "errors.deadletterqueue.topic.replication.factor": {{ $.Values.connect.errors.deadLetterQueue.replicationFactor | quote }},
       "errors.deadletterqueue.context.headers.enable": {{ ternary "true" "false" $.Values.connect.errors.deadLetterQueue.contextHeadersEnable | quote }},
-      "username": "${file:/etc/clickhouse/clickhouse.properties:username}",
-      "password": "${file:/etc/clickhouse/clickhouse.properties:password}",
+      "username": {{ printf "${file:%s:username}" (default "/etc/clickhouse/clickhouse.properties" $.Values.clickhouse.credentialsFile) | quote }},
+      "password": {{ printf "${file:%s:password}" (default "/etc/clickhouse/clickhouse.properties" $.Values.clickhouse.credentialsFile) | quote }},
       "exactlyOnce": "true",
       "consumer.override.isolation.level": "read_committed",
       "bufferCount": "0",
@@ -54,9 +54,15 @@ spec:
       labels:
         {{- include "durable-clickhouse-sink.labels" $ | nindent 8 }}
         app.kubernetes.io/component: connector-manager
+      {{- with $.Values.registration.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       restartPolicy: OnFailure
-      automountServiceAccountToken: false
+      {{- with $.Values.registration.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
       securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
       initContainers:
         - name: validate-clickhouse-targets
@@ -64,7 +70,9 @@ spec:
           imagePullPolicy: {{ $.Values.connect.image.pullPolicy }}
           command: ["/bin/durable-clickhouse-backup", "validate-targets", "/etc/durable-clickhouse/target.json"]
           volumeMounts:
+            {{- if $.Values.clickhouse.credentialsSecret.name }}
             - {name: clickhouse-credentials, mountPath: /etc/clickhouse, readOnly: true}
+            {{- end }}
             - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
       containers:
         - name: register
@@ -88,12 +96,14 @@ spec:
         - name: connector
           configMap:
             name: {{ $name }}-connector
+        {{- if $.Values.clickhouse.credentialsSecret.name }}
         - name: clickhouse-credentials
           secret:
             secretName: {{ $.Values.clickhouse.credentialsSecret.name }}
             items:
               - key: {{ $.Values.clickhouse.credentialsSecret.propertiesKey }}
                 path: clickhouse.properties
+        {{- end }}
         - name: runtime-config
           configMap:
             name: {{ include "durable-clickhouse-sink.fullname" $ }}-runtime
@@ -119,7 +129,6 @@ spec:
         app.kubernetes.io/component: connector-manager
     spec:
       restartPolicy: OnFailure
-      automountServiceAccountToken: false
       securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
       containers:
         - name: unregister
