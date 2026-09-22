@@ -32,12 +32,12 @@
   }: let
     systems = ["x86_64-linux" "aarch64-linux"];
     forAllSystems = nixpkgs.lib.genAttrs systems;
+    chartSource = ./chart;
   in {
     packages = forAllSystems (system: let
       pkgs = import nixpkgs {inherit system;};
       backup = pkgs.callPackage ./nix/backup.nix {};
       images = import ./nix/images.nix {inherit pkgs system backup nix2container;};
-      chartSource = ./chart;
       chart = pkgs.runCommand "durable-clickhouse-sink-chart-0.1.0" {nativeBuildInputs = [pkgs.kubernetes-helm];} ''
         mkdir -p $out
         helm package ${chartSource} --destination $out
@@ -48,7 +48,7 @@
         extraSpecialArgs = {inherit chartSource;};
       };
     in {
-      inherit backup chart chartSource;
+      inherit backup chart;
       connectImage = images.connect;
       manifests = nixidyEnv.environmentPackage;
       default = chart;
@@ -76,19 +76,19 @@
             --set backup.maxIncrementalsPerFull=2
             --set backup.maxBandwidthBytesPerSecond=1048576
           )
-          helm lint --strict ${packages.chartSource} "''${chart_args[@]}"
-          helm template test ${packages.chartSource} "''${chart_args[@]}" > rendered.yaml
-          helm template test ${packages.chartSource} "''${chart_args[@]}" \
+          helm lint --strict ${chartSource} "''${chart_args[@]}"
+          helm template test ${chartSource} "''${chart_args[@]}" > rendered.yaml
+          helm template test ${chartSource} "''${chart_args[@]}" \
             --set-string kafka.existingSecret=kafka-credentials > /dev/null
-          helm template test ${packages.chartSource} "''${chart_args[@]}" \
+          helm template test ${chartSource} "''${chart_args[@]}" \
             --set backup.enabled=false > rendered-without-backups.yaml
-          helm template test ${packages.chartSource} "''${chart_args[@]}" \
+          helm template test ${chartSource} "''${chart_args[@]}" \
             --set-string 'pipelines[1].name=other' \
             --set-string 'pipelines[1].topic=other.input' \
             --set-string 'pipelines[1].table=records' > rendered-shared-table.yaml
 
           expect_rejected() {
-            if helm template test ${packages.chartSource} "''${chart_args[@]}" "$@" >/dev/null 2>&1; then
+            if helm template test ${chartSource} "''${chart_args[@]}" "$@" >/dev/null 2>&1; then
               echo "unsafe values were accepted: $*" >&2
               exit 1
             fi
@@ -143,10 +143,10 @@
           grep -F '/etc/durable-clickhouse/recovery.json' rendered.yaml >/dev/null
           grep -F '"replayTopicRetentionMs": 604800000' rendered.yaml >/dev/null
           grep -F 'secretName: clickhouse-recovery-credentials' rendered.yaml >/dev/null
-          grep -F 'backupID:' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
-          grep -F 'rule: self == oldSelf' ${packages.chartSource}/crds/table-recovery.yaml >/dev/null
+          grep -F 'backupID:' ${chartSource}/crds/table-recovery.yaml >/dev/null
+          grep -F 'rule: self == oldSelf' ${chartSource}/crds/table-recovery.yaml >/dev/null
           ${packages.backup}/bin/durable-clickhouse-backup print-recovery-crd > generated-recovery-crd.yaml
-          diff -u ${packages.chartSource}/crds/table-recovery.yaml generated-recovery-crd.yaml
+          diff -u ${chartSource}/crds/table-recovery.yaml generated-recovery-crd.yaml
           touch $out
         '';
     });
