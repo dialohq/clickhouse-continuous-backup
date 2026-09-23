@@ -333,8 +333,14 @@ impl ClickHouse {
     }
 
     pub async fn clone_target(&self, database: &str, source: &str, snapshot: &str) -> Result<()> {
+        // simpler alternative is to `CREATE TABLE ... CLONE AS ...` but that's unsupported by the
+        // `Replicated` database engine while this is supported on both `Replicated` and `Atomic`
         self.query(&format!(
-            "CREATE TABLE `{database}`.`{snapshot}` ENGINE = MergeTree CLONE AS `{database}`.`{source}`"
+            "CREATE TABLE `{database}`.`{snapshot}` ENGINE = MergeTree AS `{database}`.`{source}`"
+        ))
+        .await?;
+        self.query(&format!(
+            "ALTER TABLE `{database}`.`{snapshot}` ATTACH PARTITION ALL FROM `{database}`.`{source}`"
         ))
         .await?;
         Ok(())
