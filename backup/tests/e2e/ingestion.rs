@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::timing::TestReport;
-use crate::{DnvrBackend, TestEnvironment};
+use crate::{DatabaseEngine, DnvrBackend, TestEnvironment};
 use anyhow::Result;
 
 #[tokio::test]
@@ -18,7 +18,11 @@ async fn ingests_records() -> Result<()> {
     let env = timings
         .measure(
             "environment startup",
-            TestEnvironment::start(DnvrBackend::new(project_root, timings.clone())?),
+            TestEnvironment::start(DnvrBackend::new(
+                project_root,
+                timings.clone(),
+                DatabaseEngine::Atomic,
+            )?),
         )
         .await?;
     let prefix = format!(

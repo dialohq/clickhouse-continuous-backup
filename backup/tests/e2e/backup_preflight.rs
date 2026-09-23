@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use crate::timing::TestReport;
-use crate::{DnvrBackend, TestEnvironment, clients::ConnectorState};
+use crate::{DatabaseEngine, DnvrBackend, TestEnvironment, clients::ConnectorState};
 use anyhow::{Result, ensure};
 
 const CONNECTOR: &str = "durable-clickhouse-sink-records";
@@ -17,7 +17,11 @@ async fn backup_refuses_a_paused_connector_without_resuming_it() -> Result<()> {
     let env = timings
         .measure(
             "environment startup",
-            TestEnvironment::start(DnvrBackend::new(project_root, timings.clone())?),
+            TestEnvironment::start(DnvrBackend::new(
+                project_root,
+                timings.clone(),
+                DatabaseEngine::Atomic,
+            )?),
         )
         .await?;
 

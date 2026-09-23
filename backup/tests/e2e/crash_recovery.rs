@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::timing::TestReport;
-use crate::{Component, DnvrBackend, TestEnvironment, clients::ConnectorState};
+use crate::{Component, DatabaseEngine, DnvrBackend, TestEnvironment, clients::ConnectorState};
 use anyhow::Result;
 use tokio::time::sleep;
 
@@ -19,7 +19,11 @@ async fn ingests_exactly_once_across_connect_restarts() -> Result<()> {
     let env = timings
         .measure(
             "environment startup",
-            TestEnvironment::start(DnvrBackend::new(project_root, timings.clone())?),
+            TestEnvironment::start(DnvrBackend::new(
+                project_root,
+                timings.clone(),
+                DatabaseEngine::Replicated,
+            )?),
         )
         .await?;
     timings

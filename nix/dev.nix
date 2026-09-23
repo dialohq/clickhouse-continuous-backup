@@ -354,22 +354,36 @@ in {
     };
 
     processes.schema = {
-      packages = [pkgs.clickhouse];
+      packages = [pkgs.clickhouse pkgs.minijinja];
       env = {
         CLICKHOUSE_HOST = "dnvr://clickhouse/host";
         CLICKHOUSE_TCP_PORT = "dnvr://clickhouse/tcpPort";
         CLICKHOUSE_DATABASE = "durable_e2e";
+        CLICKHOUSE_DATABASE_ENGINE = "Atomic";
         SCHEMA_FILE = toString ./schema.sql;
       };
       command = pkgs.writeShellApplication {
         name = "durable-sink-schema";
-        runtimeInputs = [pkgs.clickhouse];
+        runtimeInputs = [pkgs.clickhouse pkgs.minijinja];
         text = ''
+          case "$CLICKHOUSE_DATABASE_ENGINE" in
+            Atomic) database_engine="Atomic" ;;
+            Replicated) database_engine="Replicated('/clickhouse/databases/durable_e2e', '{shard}', '{replica}')" ;;
+            *) echo "Unsupported database engine: $CLICKHOUSE_DATABASE_ENGINE" >&2; exit 1 ;;
+          esac
+          clickhouse-client \
+            --host "$CLICKHOUSE_HOST" \
+            --port "$CLICKHOUSE_TCP_PORT" \
+            --query "CREATE DATABASE IF NOT EXISTS durable_e2e ENGINE = $database_engine"
+          schema="$DNVR_RUNTIME_DIR/schema.sql"
+          minijinja-cli --strict --autoescape none \
+            --define database_engine="$CLICKHOUSE_DATABASE_ENGINE" \
+            "$SCHEMA_FILE" --output "$schema"
           clickhouse-client \
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --multiquery \
-            < "$SCHEMA_FILE"
+            < "$schema"
           echo "Applied schema for $CLICKHOUSE_DATABASE"
         '';
       };

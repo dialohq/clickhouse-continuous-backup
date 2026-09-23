@@ -15,7 +15,7 @@ use tokio::{
     time::{Instant, sleep},
 };
 
-use super::{Component, Endpoints, EnvironmentBackend};
+use super::{Component, DatabaseEngine, Endpoints, EnvironmentBackend};
 use crate::timing::Timings;
 
 const START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -47,6 +47,7 @@ impl ProcessState {
 pub struct DnvrBackend {
     instance: TempDir,
     project_root: PathBuf,
+    database_engine: DatabaseEngine,
     api_url: Option<String>,
     server_pid: Option<u32>,
     client: Client,
@@ -54,7 +55,11 @@ pub struct DnvrBackend {
 }
 
 impl DnvrBackend {
-    pub fn new(project_root: impl Into<PathBuf>, timings: Timings) -> Result<Self> {
+    pub fn new(
+        project_root: impl Into<PathBuf>,
+        timings: Timings,
+        database_engine: DatabaseEngine,
+    ) -> Result<Self> {
         let instance = tempfile::Builder::new().prefix("durable-e2e-").tempdir()?;
         // The report owns logs separately from disposable service data, so it
         // can retain them even when startup fails and this backend is dropped.
@@ -62,6 +67,7 @@ impl DnvrBackend {
         Ok(Self {
             instance,
             project_root: project_root.into(),
+            database_engine,
             api_url: None,
             server_pid: None,
             client: Client::new(),
@@ -264,6 +270,11 @@ impl EnvironmentBackend for DnvrBackend {
         );
         let mut child = Command::new("dnvr")
             .arg("up")
+            .arg("--env")
+            .arg(format!(
+                "schema.CLICKHOUSE_DATABASE_ENGINE={}",
+                self.database_engine.as_str()
+            ))
             .current_dir(&self.project_root)
             .env("DNVR_STATE", self.instance.path())
             .stdin(Stdio::null())

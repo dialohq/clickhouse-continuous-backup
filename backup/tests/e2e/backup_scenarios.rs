@@ -5,7 +5,7 @@ use durable_clickhouse_backup::model::{BackupKind, BackupOutput, BackupParent};
 use tokio::time::{sleep, timeout};
 
 use crate::{
-    DnvrBackend, EnvironmentBackend, TestEnvironment,
+    DatabaseEngine, DnvrBackend, EnvironmentBackend, TestEnvironment,
     clients::ConnectorState,
     timing::{TestReport, Timings},
 };
@@ -15,7 +15,10 @@ const CATALOG: &str = "durable-clickhouse-sink.backup-catalog";
 const WAIT: Duration = Duration::from_secs(120);
 const BACKUP_TIMEOUT: Duration = Duration::from_secs(180);
 
-async fn start(timings: &Timings) -> Result<TestEnvironment<DnvrBackend>> {
+async fn start(
+    timings: &Timings,
+    database_engine: DatabaseEngine,
+) -> Result<TestEnvironment<DnvrBackend>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -23,7 +26,7 @@ async fn start(timings: &Timings) -> Result<TestEnvironment<DnvrBackend>> {
     let env = timings
         .measure(
             "environment startup",
-            TestEnvironment::start(DnvrBackend::new(root, timings.clone())?),
+            TestEnvironment::start(DnvrBackend::new(root, timings.clone(), database_engine)?),
         )
         .await?;
     timings
@@ -161,7 +164,7 @@ fn check_backup(
 async fn bad_credentials_do_not_pause_connector_or_create_backup() -> Result<()> {
     let mut report = TestReport::new("bad_credentials")?;
     let timings = report.timings();
-    let env = start(&timings).await?;
+    let env = start(&timings, DatabaseEngine::Atomic).await?;
     let query = "SELECT count() FROM system.backups WHERE status = 'BACKUP_CREATED'";
     let before = env.clickhouse.query(query).await?;
     let mut config = env.backup.config("bad-credentials")?;
@@ -201,7 +204,7 @@ async fn bad_credentials_do_not_pause_connector_or_create_backup() -> Result<()>
 async fn incremental_backup_refuses_a_missing_parent_manifest() -> Result<()> {
     let mut report = TestReport::new("missing_parent")?;
     let timings = report.timings();
-    let env = start(&timings).await?;
+    let env = start(&timings, DatabaseEngine::Atomic).await?;
     ingest(&env, &timings, 1, 50, false).await?;
     let base = backup(&env, &timings, "base").await?;
     check_backup(&base, BackupKind::Full, 0, None)?;
@@ -272,7 +275,7 @@ async fn incremental_backup_refuses_a_missing_parent_manifest() -> Result<()> {
 async fn full_incremental_backups_preserve_snapshots_and_roll_over() -> Result<()> {
     let mut report = TestReport::new("backup_chain")?;
     let timings = report.timings();
-    let env = start(&timings).await?;
+    let env = start(&timings, DatabaseEngine::Replicated).await?;
     ingest(&env, &timings, 1, 1100, true).await?;
 
     let base = {
