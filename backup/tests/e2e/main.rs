@@ -8,5 +8,5 @@ mod backup_scenarios;
 mod crash_recovery;
 mod ingestion;
 
-pub use backend::{Component, DnvrBackend, Endpoints, EnvironmentBackend};
+pub use backend::{Component, DatabaseEngine, DnvrBackend, Endpoints, EnvironmentBackend};
 pub use environment::TestEnvironment;

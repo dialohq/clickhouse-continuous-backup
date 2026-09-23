@@ -5,6 +5,21 @@ use async_trait::async_trait;
 
 pub use dnvr::DnvrBackend;
 
+#[derive(Clone, Copy, Debug)]
+pub enum DatabaseEngine {
+    Atomic,
+    Replicated,
+}
+
+impl DatabaseEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Atomic => "Atomic",
+            Self::Replicated => "Replicated",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Endpoints {
     pub kafka: String,

@@ -38,6 +38,18 @@ separate state directory and ports. There are six service scenarios; the command
 above runs at most five environments concurrently. It requires a dnvr version supporting
 state-preserving restarts.
 
+Each test selects `DatabaseEngine::Atomic` or `DatabaseEngine::Replicated` when
+constructing `DnvrBackend`. The Connect restart and full/incremental lifecycle
+scenarios select Replicated; the other four select Atomic. The schema setup renders `nix/schema.sql` using that
+selection. Tables use ReplicatedMergeTree in both modes: Atomic supplies explicit
+Keeper paths with `{shard}` and `{replica}` macros; Replicated uses default engine
+arguments. This is still a single ClickHouse instance, so it does not test
+replication between servers.
+
+For an interactive Replicated environment, use fresh state with `dnvr up --env schema.CLICKHOUSE_DATABASE_ENGINE=Replicated`.
+Interactive dnvr defaults to Atomic. Changing the option does not convert an
+existing database.
+
 Concurrency also depends on host resources. Each Redpanda instance uses Linux
 AIO capacity shared with other brokers on the host. If its log reports minimum
 AIO requirements are not met, reduce `--test-threads` or increase the host's
