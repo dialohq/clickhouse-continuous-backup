@@ -10,6 +10,7 @@ use axum::{
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::{join_all, try_join_all};
 use tokio::time::sleep;
+use tracing::{Span, debug, error, field, info, instrument, warn};
 use uuid::Uuid;
 
 use super::{
@@ -19,18 +20,23 @@ use super::{
     registry::{Pause, Pauses},
 };
 
+#[instrument(skip_all, fields(request = ?request, token = field::Empty))]
 pub(super) async fn pause(
     State(state): State<AppState>,
     Json(request): Json<PauseRequest>,
 ) -> Response {
     let mut pauses = state.pauses.lock().await;
+    debug!("acquired the pause lock");
     let pipelines = state
         .pipelines
         .iter()
         .filter(|pipeline| request.matches(pipeline))
         .collect::<Vec<_>>();
     if pipelines.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
+        return reject(
+            StatusCode::NOT_FOUND,
+            "no pipeline matches the request".to_owned(),
+        );
     }
     let connectors = pipelines
         .iter()
@@ -38,6 +44,7 @@ pub(super) async fn pause(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    info!(?connectors, "pausing pipelines");
 
     let statuses = match try_join_all(
         connectors
@@ -47,18 +54,27 @@ pub(super) async fn pause(
     .await
     {
         Ok(statuses) => statuses,
-        Err(error) => return (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response(),
+        Err(error) => return reject(StatusCode::BAD_GATEWAY, format!("{error:#}")),
     };
+    for (connector, status) in connectors.iter().zip(&statuses) {
+        debug!(
+            connector,
+            running = status.is_running(),
+            paused = status.is_paused(),
+            failed = status.is_failed(),
+            held = pauses.is_held(connector),
+            "connector status"
+        );
+    }
     if let Some((connector, _)) = connectors
         .iter()
         .zip(&statuses)
         .find(|(_, status)| status.is_failed())
     {
-        return (
+        return reject(
             StatusCode::CONFLICT,
             format!("connector has failed: {connector}"),
-        )
-            .into_response();
+        );
     }
     // A connector we don't hold must be running: if it's paused or stopped, someone outside this
     // server did it, and a later resume from here would undo their decision.
@@ -67,11 +83,10 @@ pub(super) async fn pause(
         .zip(&statuses)
         .find(|(connector, status)| !status.is_running() && !pauses.is_held(connector))
     {
-        return (
+        return reject(
             StatusCode::CONFLICT,
             format!("connector is not running and was not paused by this server: {connector}"),
-        )
-            .into_response();
+        );
     }
 
     // Register the pause before touching Connect, so every connector it pauses is accounted for.
@@ -79,6 +94,7 @@ pub(super) async fn pause(
     // can't resume them under this one.
     // The expiry also covers a crash during this request: the reloaded token lapses on its own.
     let token = Uuid::new_v4();
+    Span::current().record("token", field::display(token));
     pauses.hold(
         token,
         Pause {
@@ -91,8 +107,9 @@ pub(super) async fn pause(
     );
     if let Err(error) = pauses.save(&state.pauses_file) {
         pauses.release(&token);
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
+        return reject(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
+    info!("registered pause");
     // Started now rather than on success: if the client disconnects, axum drops this handler
     // midway and the expiry is what resumes whatever it already paused. It can't act before this
     // request releases the lock.
@@ -105,6 +122,7 @@ pub(super) async fn pause(
         .filter(|(_, status)| !status.is_paused())
         .map(|(connector, _)| *connector)
         .collect::<Vec<_>>();
+    debug!(?running, "connectors that need pausing");
 
     let result = async {
         try_join_all(
@@ -124,10 +142,12 @@ pub(super) async fn pause(
     match result {
         Ok(watermark) => {
             // The TTL counts from the response, not from the start of the request.
-            pauses.renew(&token, expiry(state.ttl));
+            let expires_at = expiry(state.ttl);
+            pauses.renew(&token, expires_at);
             if let Err(error) = pauses.save(&state.pauses_file) {
-                eprintln!("failed to save the expiry of pause {token}: {error:#}");
+                error!("failed to save the expiry of the pause: {error:#}");
             }
+            info!(%expires_at, "paused");
             Json(PauseResponse {
                 token,
                 ttl_seconds: state.ttl.as_secs(),
@@ -138,31 +158,40 @@ pub(super) async fn pause(
         Err(error) => {
             let released = pauses.held_only_by(&token);
             if let Err(error) = forget(&state, &mut pauses, &token) {
-                eprintln!("failed to remove pause {token} after a failed /pause: {error:#}");
+                error!("failed to remove the pause after a failed /pause: {error:#}");
             }
             // Best effort: a failure cancels the other pauses, any of which may already be paused.
-            join_all(
+            warn!(?released, "resuming connectors after a failed /pause");
+            let resumes = join_all(
                 released
                     .iter()
                     .map(|connector| state.connect.resume(connector)),
             )
             .await;
-            (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response()
+            for (connector, resume) in released.iter().zip(resumes) {
+                if let Err(error) = resume {
+                    error!(connector, "best-effort resume failed: {error:#}");
+                }
+            }
+            reject(StatusCode::BAD_GATEWAY, format!("{error:#}"))
         }
     }
 }
 
+#[instrument(skip_all, fields(token = %request.token))]
 pub(super) async fn resume(
     State(state): State<AppState>,
     Json(request): Json<ResumeRequest>,
 ) -> Response {
     let mut pauses = state.pauses.lock().await;
+    debug!("acquired the pause lock");
     let Some(connectors) = pauses
         .get(&request.token)
         .map(|pause| pause.connectors.clone())
     else {
-        return StatusCode::NOT_FOUND.into_response();
+        return reject(StatusCode::NOT_FOUND, "unknown token".to_owned());
     };
+    info!(?connectors, "resuming pause");
     let statuses = match try_join_all(
         connectors
             .iter()
@@ -171,50 +200,54 @@ pub(super) async fn resume(
     .await
     {
         Ok(statuses) => statuses,
-        Err(error) => return (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response(),
+        Err(error) => return reject(StatusCode::BAD_GATEWAY, format!("{error:#}")),
     };
     if let Some((connector, _)) = connectors
         .iter()
         .zip(&statuses)
         .find(|(_, status)| status.is_failed())
     {
-        return (
+        return reject(
             StatusCode::CONFLICT,
             format!("connector has failed: {connector}"),
-        )
-            .into_response();
+        );
     }
 
     // The token is only removed once its connectors are running again, so a failed resume can be
     // retried with the same token.
     if let Err(error) = resume_held_connectors(&state, &pauses, &request.token).await {
-        return (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response();
+        return reject(StatusCode::BAD_GATEWAY, format!("{error:#}"));
     }
     if let Err(error) = forget(&state, &mut pauses, &request.token) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
+        return reject(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
+    info!("resumed");
     StatusCode::OK.into_response()
 }
 
+#[instrument(skip_all, fields(token = %request.token))]
 pub(super) async fn renew(
     State(state): State<AppState>,
     Json(request): Json<RenewRequest>,
 ) -> Response {
     let mut pauses = state.pauses.lock().await;
     let Some(previous) = pauses.get(&request.token).map(|pause| pause.expires_at) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return reject(StatusCode::NOT_FOUND, "unknown token".to_owned());
     };
-    pauses.renew(&request.token, expiry(state.ttl));
+    let expires_at = expiry(state.ttl);
+    pauses.renew(&request.token, expires_at);
     if let Err(error) = pauses.save(&state.pauses_file) {
         pauses.renew(&request.token, previous);
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
+        return reject(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
+    debug!(%expires_at, "renewed");
     StatusCode::OK.into_response()
 }
 
 /// Waits until the token expires, then resumes its connectors as `/resume` would.
 ///
 /// A `/renew` moves the expiry while this sleeps, so it checks again under the lock before acting.
+#[instrument(skip(state))]
 pub(super) async fn expire_when_due(state: AppState, token: Uuid) {
     loop {
         let Some(expires_at) = state
@@ -226,24 +259,35 @@ pub(super) async fn expire_when_due(state: AppState, token: Uuid) {
         else {
             return;
         };
+        debug!(%expires_at, "waiting for expiry");
         sleep((expires_at - Utc::now()).to_std().unwrap_or_default()).await;
 
         let mut pauses = state.pauses.lock().await;
         match pauses.get(&token) {
-            None => return,
-            Some(pause) if pause.expires_at > Utc::now() => continue,
+            None => {
+                debug!("pause is gone, nothing to expire");
+                return;
+            }
+            Some(pause) if pause.expires_at > Utc::now() => {
+                debug!("pause was renewed");
+                continue;
+            }
             Some(_) => {}
         }
-        eprintln!("pause {token} expired, resuming its connectors");
+        warn!("pause expired without being resumed or renewed, resuming its connectors");
         let result = match resume_held_connectors(&state, &pauses, &token).await {
             Ok(()) => forget(&state, &mut pauses, &token),
             Err(error) => Err(error),
         };
         match result {
-            Ok(()) => return,
+            Ok(()) => {
+                info!("resumed expired pause");
+                return;
+            }
             Err(error) => {
-                eprintln!("failed to resume expired pause {token}, retrying: {error:#}");
-                pauses.renew(&token, expiry(state.ttl / 3));
+                let retry_at = expiry(state.ttl / 3);
+                error!(%retry_at, "failed to resume expired pause: {error:#}");
+                pauses.renew(&token, retry_at);
             }
         }
     }
@@ -278,6 +322,16 @@ fn forget(state: &AppState, pauses: &mut Pauses, token: &Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Logs the failure and turns it into the response the client sees.
+fn reject(status: StatusCode, message: String) -> Response {
+    if status.is_server_error() {
+        error!(%status, "{message}");
+    } else {
+        warn!(%status, "{message}");
+    }
+    (status, message).into_response()
+}
+
 fn expiry(ttl: std::time::Duration) -> DateTime<Utc> {
     TimeDelta::from_std(ttl)
         .ok()
@@ -285,7 +339,9 @@ fn expiry(ttl: std::time::Duration) -> DateTime<Utc> {
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
+#[instrument(skip(state))]
 async fn resume_connector(state: &AppState, connector: &str) -> Result<()> {
+    debug!("resuming connector");
     state
         .connect
         .resume(connector)
@@ -294,10 +350,14 @@ async fn resume_connector(state: &AppState, connector: &str) -> Result<()> {
     state
         .connect
         .wait_running(connector, state.pause_timeout)
-        .await
+        .await?;
+    info!("connector is running");
+    Ok(())
 }
 
+#[instrument(skip(state))]
 async fn pause_connector(state: &AppState, connector: &str) -> Result<()> {
+    debug!("pausing connector");
     state
         .connect
         .pause(connector)
@@ -306,5 +366,7 @@ async fn pause_connector(state: &AppState, connector: &str) -> Result<()> {
     state
         .connect
         .wait_paused(connector, state.pause_timeout)
-        .await
+        .await?;
+    info!("connector is paused");
+    Ok(())
 }

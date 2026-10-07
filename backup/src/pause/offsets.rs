@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 
+use tracing::{debug, instrument};
+
 use super::api::PipelineOffsets;
 use crate::{
     clickhouse::ClickHouse,
@@ -9,6 +11,7 @@ use crate::{
     model::{KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperRow, Pipeline},
 };
 
+#[instrument(skip_all, fields(connector = %pipeline.connector))]
 pub(super) async fn read_offsets(
     connect: &Connect,
     clickhouse: &ClickHouse,
@@ -21,6 +24,7 @@ pub(super) async fn read_offsets(
         .with_context(|| format!("failed to read KeeperMap state: {}", pipeline.connector))?;
     let offsets = exact_offsets(pipeline, &connect_offsets, &keeper_rows)
         .with_context(|| format!("inconsistent offsets: {}", pipeline.connector))?;
+    debug!(?offsets, keeper_rows = keeper_rows.len(), "read offsets");
     Ok(PipelineOffsets {
         connector: pipeline.connector.clone(),
         offsets,

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Client, Response, StatusCode};
 use serde::Serialize;
 use tokio::{task::AbortHandle, time::sleep};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use super::api::{PauseRequest, PauseResponse, RenewRequest, ResumeRequest};
@@ -44,6 +45,11 @@ impl PauseClient {
             .json()
             .await
             .context("pause server returned an invalid /pause response")?;
+        info!(
+            token = %response.token,
+            ttl_seconds = response.ttl_seconds,
+            "paused ingestion"
+        );
         let renewal = tokio::spawn(renew_periodically(
             self.client.clone(),
             self.base_url.clone(),
@@ -66,6 +72,7 @@ impl PauseClient {
         if let Some(renewal) = self.outstanding().remove(&token) {
             renewal.abort();
         }
+        info!(%token, "resumed ingestion");
         Ok(())
     }
 
@@ -102,6 +109,7 @@ impl Drop for PauseClient {
 }
 
 /// Renews the token until the server no longer knows it or the task is aborted.
+#[instrument(skip(client, base_url))]
 async fn renew_periodically(client: Client, base_url: Arc<str>, token: Uuid, every: Duration) {
     loop {
         sleep(every).await;
@@ -112,14 +120,14 @@ async fn renew_periodically(client: Client, base_url: Arc<str>, token: Uuid, eve
             .await;
         match result {
             Ok(response) if response.status() == StatusCode::NOT_FOUND => {
-                eprintln!("pause {token} is gone from the pause server, no longer renewing it");
+                warn!("pause is gone from the pause server, no longer renewing it");
                 return;
             }
             Ok(response) if !response.status().is_success() => {
-                eprintln!("failed to renew pause {token}: {}", response.status());
+                warn!(status = %response.status(), "failed to renew pause");
             }
-            Ok(_) => {}
-            Err(error) => eprintln!("failed to renew pause {token}: {error:#}"),
+            Ok(_) => debug!("renewed pause"),
+            Err(error) => warn!("failed to renew pause: {error:#}"),
         }
     }
 }
