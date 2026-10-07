@@ -15,6 +15,7 @@
       fi
 
       connect_url=$(dnvr-state get connect.url)
+      pause_server_url=$(dnvr-state get pause-server.url)
       clickhouse_url=$(dnvr-state get clickhouse.httpUrl)
       kafka=$(dnvr-state get redpanda.bootstrapServers)
       partitions=$(rpk --ignore-profile -X brokers="$kafka" \
@@ -24,11 +25,13 @@
 
       jq -n \
         --arg connect_url "$connect_url" \
+        --arg pause_server_url "$pause_server_url" \
         --arg clickhouse_url "$clickhouse_url" \
         --arg kafka "$kafka" \
         --argjson partitions "$partitions" \
         '{
           connectUrl: $connect_url,
+          pauseServerUrl: $pause_server_url,
           clickhouseUrl: $clickhouse_url,
           namedCollection: "durable_backups",
           pathPrefix: "durable-e2e",
@@ -297,6 +300,8 @@ in {
       env = {
         CONNECT_URL = "dnvr://connect/url";
         CLICKHOUSE_URL = "dnvr://clickhouse/httpUrl";
+        # A prebuilt binary to run instead of building one, e.g. from `cargo test`.
+        PAUSE_SERVER_BINARY = "";
       };
       command = pkgs.writeShellApplication {
         name = "durable-sink-pause-server";
@@ -316,12 +321,16 @@ in {
             ${./pause-server-config.json.j2} --output "$config"
 
           # Run the built binary directly: `cargo run` would not pass SIGTERM on to it.
-          cargo build --manifest-path "$DNVR_ROOT/backup/Cargo.toml"
+          binary="$PAUSE_SERVER_BINARY"
+          if [[ -z $binary ]]; then
+            cargo build --manifest-path "$DNVR_ROOT/backup/Cargo.toml"
+            binary="$DNVR_ROOT/backup/target/debug/durable-clickhouse-backup"
+          fi
           export CLICKHOUSE_USERNAME=default
 
           ${supervise {
             name = "Pause server";
-            start = ''"$DNVR_ROOT/backup/target/debug/durable-clickhouse-backup" pause-server "$config"'';
+            start = ''"$binary" pause-server "$config"'';
             readyWhen = ''curl --fail --silent "http://127.0.0.1:$port/health" >/dev/null'';
             onReady = ''
               dnvr-state set host 127.0.0.1

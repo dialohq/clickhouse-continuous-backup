@@ -4,14 +4,21 @@ use serde_json::json;
 
 pub struct BackupClient {
     connect_url: String,
+    pause_server_url: String,
     clickhouse_url: String,
     kafka: String,
 }
 
 impl BackupClient {
-    pub fn new(connect_url: String, clickhouse_url: String, kafka: String) -> Self {
+    pub fn new(
+        connect_url: String,
+        pause_server_url: String,
+        clickhouse_url: String,
+        kafka: String,
+    ) -> Self {
         Self {
             connect_url,
+            pause_server_url,
             clickhouse_url,
             kafka,
         }
@@ -24,6 +31,7 @@ impl BackupClient {
     pub fn config(&self, run_id: &str) -> Result<BackupConfig> {
         let config = json!({
             "connectUrl": self.connect_url,
+            "pauseServerUrl": self.pause_server_url,
             "clickhouseUrl": self.clickhouse_url,
             "namedCollection": "durable_backups",
             "pathPrefix": "durable-e2e",

@@ -1,6 +1,11 @@
+mod api;
+mod client;
 mod handlers;
 mod offsets;
 mod registry;
+
+pub(crate) use api::{PauseRequest, PipelineOffsets};
+pub(crate) use client::PauseClient;
 
 use std::{path::Path, sync::Arc, time::Duration};
 

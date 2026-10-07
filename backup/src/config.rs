@@ -69,6 +69,7 @@ pub struct RuntimeTimeouts {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupConfig {
     pub connect_url: String,
+    pub pause_server_url: String,
     pub clickhouse_url: String,
     pub clickhouse_properties_file: Option<PathBuf>,
     #[serde(skip)]

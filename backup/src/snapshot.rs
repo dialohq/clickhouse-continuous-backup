@@ -1,14 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::{
-    backup::{checkpoint, require_unchanged_keeper, resume_ingestion},
+    backup::require_unchanged_keeper,
     clickhouse::{ClickHouse, Engine, TableEngine},
     config::BackupConfig,
     connect::Connect,
     kafka::KafkaLog,
-    model::{ConnectorCheckpoint, Pipeline},
+    model::{ConnectorCheckpoint, KeeperCheckpoint, Pipeline},
+    pause::{PauseClient, PauseRequest, PipelineOffsets},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,32 +75,14 @@ impl SnapshotLayout {
         connect: &Connect,
         clickhouse: &ClickHouse,
         kafka: &KafkaLog,
+        pauses: &PauseClient,
     ) -> Result<Vec<ConnectorCheckpoint>> {
         let mut checkpoints = Vec::with_capacity(config.pipelines.len());
         for group in &self.groups {
-            let connectors = group
-                .pipelines
-                .iter()
-                .map(|pipeline| pipeline.connector.as_str())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let snapshot = pause_ingestion_and_capture_snapshot(
-                config,
-                connect,
-                clickhouse,
-                kafka,
-                group,
-                &connectors,
-            )
-            .await;
-            let resume = resume_ingestion(connect, &connectors).await;
-            match (snapshot, resume) {
-                (Ok(captured), Ok(())) => checkpoints.extend(captured),
-                (Err(snapshot), Ok(())) => return Err(snapshot),
-                (Ok(_), Err(resume)) => return Err(resume),
-                (Err(snapshot), Err(resume)) => return Err(snapshot.context(resume)),
-            }
+            let captured =
+                pause_ingestion_and_capture_snapshot(connect, clickhouse, kafka, pauses, group)
+                    .await?;
+            checkpoints.extend(captured);
         }
         Ok(checkpoints)
     }
@@ -137,57 +120,71 @@ impl SnapshotLayout {
 }
 
 async fn pause_ingestion_and_capture_snapshot(
-    config: &BackupConfig,
     connect: &Connect,
     clickhouse: &ClickHouse,
     kafka: &KafkaLog,
+    pauses: &PauseClient,
     group: &SnapshotGroup,
-    connectors: &[&str],
 ) -> Result<Vec<ConnectorCheckpoint>> {
-    pause_ingestion(config, connect, connectors).await?;
-    let checkpoints = capture_checkpoints(connect, clickhouse, &group.pipelines).await?;
-    kafka.require_offsets_replayable(&checkpoints)?;
     let table = &group.target;
-    if group.target.engine.is_replicated() {
-        clickhouse
-            .sync_replication(&table.database, &table.source)
-            .await?;
-    }
-    clickhouse
-        .clone_target(&table.database, &table.source, &table.snapshot)
+    let pause = pauses
+        .pause(&PauseRequest::Table(table.source.clone()))
         .await?;
-    require_unchanged_checkpoint(connect, clickhouse, &group.pipelines, &checkpoints).await?;
-    Ok(checkpoints)
-}
-
-async fn pause_ingestion(
-    config: &BackupConfig,
-    connect: &Connect,
-    connectors: &[&str],
-) -> Result<()> {
-    for connector in connectors {
-        connect.pause(connector).await?;
-    }
-    for connector in connectors {
-        connect.wait_paused(connector, config.pause_timeout).await?;
-    }
-    Ok(())
-}
-
-async fn capture_checkpoints(
-    connect: &Connect,
-    clickhouse: &ClickHouse,
-    pipelines: &[Pipeline],
-) -> Result<Vec<ConnectorCheckpoint>> {
-    let mut checkpoints = Vec::with_capacity(pipelines.len());
-    for pipeline in pipelines {
-        let observed = connect.offsets(&pipeline.connector).await?;
-        let rows = clickhouse
-            .keeper_rows(&pipeline.database, &pipeline.state_table)
+    let snapshot = async {
+        let checkpoints = checkpoints_from_watermark(&group.pipelines, &pause.watermark)?;
+        kafka.require_offsets_replayable(&checkpoints)?;
+        if table.engine.is_replicated() {
+            clickhouse
+                .sync_replication(&table.database, &table.source)
+                .await?;
+        }
+        clickhouse
+            .clone_target(&table.database, &table.source, &table.snapshot)
             .await?;
-        checkpoints.push(checkpoint(pipeline, observed, rows)?);
+        require_unchanged_checkpoint(connect, clickhouse, &group.pipelines, &checkpoints).await?;
+        Ok(checkpoints)
     }
-    Ok(checkpoints)
+    .await;
+    let resume = pauses.resume(pause.token).await;
+    match (snapshot, resume) {
+        (Ok(checkpoints), Ok(())) => Ok(checkpoints),
+        (Err(snapshot), Ok(())) => Err(snapshot),
+        (Ok(_), Err(resume)) => Err(resume),
+        (Err(snapshot), Err(resume)) => Err(snapshot.context(resume)),
+    }
+}
+
+/// Builds each pipeline's checkpoint from the exact offsets the pause server derived.
+fn checkpoints_from_watermark(
+    pipelines: &[Pipeline],
+    watermark: &[PipelineOffsets],
+) -> Result<Vec<ConnectorCheckpoint>> {
+    pipelines
+        .iter()
+        .map(|pipeline| {
+            let offsets = watermark
+                .iter()
+                .find(|offsets| offsets.connector == pipeline.connector)
+                .with_context(|| {
+                    format!("pause server returned no offsets: {}", pipeline.connector)
+                })?;
+            Ok(ConnectorCheckpoint {
+                name: pipeline.connector.clone(),
+                database: pipeline.database.clone(),
+                table: pipeline.table.clone(),
+                topic: pipeline.topic.clone(),
+                partitions: pipeline.partitions,
+                offsets: offsets.offsets.clone(),
+                observed_connect_offsets: offsets.connect_offsets.clone(),
+                keeper: KeeperCheckpoint {
+                    database: pipeline.database.clone(),
+                    table: pipeline.state_table.clone(),
+                    path: pipeline.keeper_path.clone(),
+                    rows: offsets.keeper_rows.clone(),
+                },
+            })
+        })
+        .collect()
 }
 
 async fn require_unchanged_checkpoint(

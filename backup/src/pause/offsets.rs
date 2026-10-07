@@ -1,22 +1,13 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
 
+use super::api::PipelineOffsets;
 use crate::{
     clickhouse::ClickHouse,
     connect::{Connect, validate_offsets},
     model::{KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperRow, Pipeline},
 };
-
-/// Exact offsets of one pipeline, with the Connect offsets and KeeperMap rows they came from.
-#[derive(Serialize)]
-pub(super) struct PipelineOffsets {
-    connector: String,
-    offsets: Vec<KafkaOffset>,
-    connect_offsets: Vec<KafkaOffset>,
-    keeper_rows: Vec<KeeperRow>,
-}
 
 pub(super) async fn read_offsets(
     connect: &Connect,
@@ -39,8 +30,6 @@ pub(super) async fn read_offsets(
 }
 
 /// Derives exact offsets from KeeperMap and cross-checks them against Connect's offsets.
-///
-/// Copied from `backup::checkpoint`; keep the validation in sync.
 fn exact_offsets(
     pipeline: &Pipeline,
     observed: &[KafkaOffset],

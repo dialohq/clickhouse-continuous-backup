@@ -27,6 +27,7 @@ pub struct Endpoints {
     pub clickhouse_tcp_port: u16,
     pub clickhouse_http_url: String,
     pub connect_url: String,
+    pub pause_server_url: String,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use tokio::signal::unix::{SignalKind, signal};
@@ -12,10 +10,10 @@ use crate::{
     metadata::{BackupMetadataLease, BackupMetadataStorage, KafkaBackupMetadataStorage},
     model::{
         BackupChain, BackupChainState, BackupKind, BackupManifest, BackupOutput, BackupParent,
-        BackupReference, ConnectorCheckpoint, KafkaOffset, KafkaOffsetValue, KafkaPartition,
-        KeeperCheckpoint, KeeperRow, Pipeline, clickhouse_identifier, kafka_name, safe_chain_id,
-        safe_keeper_path, safe_storage_path,
+        BackupReference, ConnectorCheckpoint, KeeperRow, Pipeline, clickhouse_identifier,
+        kafka_name, safe_chain_id, safe_keeper_path, safe_storage_path,
     },
+    pause::PauseClient,
     snapshot::SnapshotLayout,
 };
 
@@ -40,6 +38,11 @@ pub async fn run(config: &BackupConfig) -> Result<BackupOutput> {
     for connector in &connectors {
         connect.require_running(connector).await?;
     }
+    let pauses = PauseClient::new(
+        config.pause_server_url.clone(),
+        &config.timeouts,
+        config.pause_timeout + config.timeouts.connect_request,
+    )?;
 
     let metadata = KafkaBackupMetadataStorage::new(
         &config.kafka_bootstrap_servers,
@@ -67,7 +70,15 @@ pub async fn run(config: &BackupConfig) -> Result<BackupOutput> {
     let snapshots = SnapshotLayout::new(&config.run_id, &config.pipelines, &engines)?;
     snapshots.cleanup(&clickhouse).await?;
 
-    let operation = create_backup(config, &connect, &clickhouse, lease, &plan, &snapshots);
+    let operation = create_backup(
+        config,
+        &connect,
+        &clickhouse,
+        &pauses,
+        lease,
+        &plan,
+        &snapshots,
+    );
     tokio::pin!(operation);
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -76,7 +87,8 @@ pub async fn run(config: &BackupConfig) -> Result<BackupOutput> {
         _ = interrupt.recv() => Err(anyhow::anyhow!("backup interrupted")),
         _ = terminate.recv() => Err(anyhow::anyhow!("backup terminated")),
     };
-    let resume = resume_ingestion(&connect, &connectors).await;
+    // Resumes a pause the operation still held, e.g. when a signal interrupted a snapshot.
+    let resume = pauses.resume_outstanding().await;
     if let Err(error) = snapshots.cleanup(&clickhouse).await {
         eprintln!("failed to remove ClickHouse snapshot tables: {error:#}");
     }
@@ -92,6 +104,7 @@ async fn create_backup(
     config: &BackupConfig,
     connect: &Connect,
     clickhouse: &ClickHouse,
+    pauses: &PauseClient,
     metadata: impl BackupMetadataLease,
     plan: &BackupPlan,
     snapshots: &SnapshotLayout,
@@ -104,7 +117,7 @@ async fn create_backup(
 
     let checkpoints = snapshots
         .capture_immutable_snapshots_during_short_ingestion_pauses(
-            config, connect, clickhouse, &kafka,
+            config, connect, clickhouse, &kafka, pauses,
         )
         .await?;
     kafka.require_offsets_replayable(&checkpoints)?;
@@ -211,105 +224,6 @@ fn plan_backup(
             pipelines: pipelines.to_vec(),
         },
     }
-}
-
-pub(crate) fn checkpoint(
-    pipeline: &Pipeline,
-    observed: Vec<KafkaOffset>,
-    rows: Vec<KeeperRow>,
-) -> Result<ConnectorCheckpoint> {
-    validate_offsets(&observed)?;
-    let prefix = format!("{}-", pipeline.topic);
-    if rows.iter().any(|row| !row.key.starts_with(&prefix)) {
-        bail!("KeeperMap state contains an unexpected topic")
-    }
-    if rows.iter().any(|row| row.min_offset > row.max_offset) {
-        bail!("KeeperMap state contains an invalid offset range")
-    }
-    if rows.iter().any(|row| row.max_offset > i64::MAX as u64) {
-        bail!("KeeperMap state exceeds the connector's signed offset range")
-    }
-    let relevant = rows
-        .iter()
-        .filter_map(|row| {
-            row.key
-                .strip_prefix(&prefix)
-                .map(|partition| (partition, row))
-        })
-        .map(|(partition, row)| {
-            let partition = partition
-                .parse::<u32>()
-                .context("KeeperMap state key has an invalid partition")?;
-            if partition >= pipeline.partitions {
-                bail!("KeeperMap state contains an out-of-range partition")
-            }
-            if row.state != "AFTER_PROCESSING" {
-                bail!("KeeperMap state is not safely committed: {}", row.key)
-            }
-            Ok((partition, row))
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
-    if relevant.len()
-        != rows
-            .iter()
-            .filter(|row| row.key.starts_with(&prefix))
-            .count()
-    {
-        bail!("KeeperMap state contains duplicate partitions")
-    }
-
-    let mut offsets = Vec::with_capacity(pipeline.partitions as usize);
-    for partition in 0..pipeline.partitions {
-        let exact = relevant
-            .get(&partition)
-            .map(|row| {
-                row.max_offset
-                    .checked_add(1)
-                    .context("KeeperMap offset overflow")
-            })
-            .transpose()?
-            .unwrap_or(0);
-        if let Some(committed) = observed.iter().find(|offset| {
-            offset.partition.kafka_topic == pipeline.topic
-                && offset.partition.kafka_partition == partition
-        }) && committed.offset.kafka_offset > exact
-        {
-            bail!(
-                "Kafka Connect offset is ahead of ClickHouse KeeperMap state: {}-{partition}",
-                pipeline.topic
-            )
-        }
-        offsets.push(KafkaOffset {
-            partition: KafkaPartition {
-                kafka_topic: pipeline.topic.clone(),
-                kafka_partition: partition,
-            },
-            offset: KafkaOffsetValue {
-                kafka_offset: exact,
-            },
-        });
-    }
-    if observed.iter().any(|offset| {
-        offset.partition.kafka_topic != pipeline.topic
-            || offset.partition.kafka_partition >= pipeline.partitions
-    }) {
-        bail!("connector returned an unexpected topic partition")
-    }
-    Ok(ConnectorCheckpoint {
-        name: pipeline.connector.clone(),
-        database: pipeline.database.clone(),
-        table: pipeline.table.clone(),
-        topic: pipeline.topic.clone(),
-        partitions: pipeline.partitions,
-        offsets,
-        observed_connect_offsets: observed,
-        keeper: KeeperCheckpoint {
-            database: pipeline.database.clone(),
-            table: pipeline.state_table.clone(),
-            path: pipeline.keeper_path.clone(),
-            rows,
-        },
-    })
 }
 
 pub fn validate_chain(chain: Option<&BackupChain>, pipelines: &[Pipeline]) -> Result<()> {
@@ -547,26 +461,13 @@ fn backup_destination(value: &str) -> bool {
     clickhouse_identifier(collection) && safe_storage_path(path)
 }
 
-pub(crate) async fn resume_ingestion(connect: &Connect, connectors: &[&str]) -> Result<()> {
-    let mut failures = Vec::new();
-    for connector in connectors {
-        if let Err(error) = connect.resume(connector).await {
-            failures.push(format!("{connector}: {error:#}"));
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        bail!("failed to resume connectors: {}", failures.join(", "))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
     use uuid::Uuid;
 
     use super::*;
+    use crate::model::{KafkaOffset, KafkaOffsetValue, KafkaPartition, KeeperCheckpoint};
 
     fn reference(kind: BackupKind, position: u32) -> BackupReference {
         BackupReference {
@@ -673,140 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn keeper_checkpoint_is_exact_even_when_connect_lags() {
-        let checkpoint = checkpoint(
-            &pipeline(),
-            vec![offset(0, 8)],
-            vec![row(0, 9, "AFTER_PROCESSING")],
-        )
-        .unwrap();
-        assert_eq!(
-            checkpoint.offsets,
-            vec![offset(0, 10), offset(1, 0), offset(2, 0)]
-        );
-        assert_eq!(checkpoint.observed_connect_offsets, vec![offset(0, 8)]);
-    }
-
-    #[test]
-    fn connect_may_lag_keeper_by_any_amount_but_never_lead() {
-        for max_offset in [0, 1, 2, 31, 1024, u32::MAX as u64] {
-            let exact = max_offset + 1;
-            for observed in [0, 1, exact / 2, exact] {
-                let point = checkpoint(
-                    &pipeline(),
-                    vec![offset(0, observed)],
-                    vec![row(0, max_offset, "AFTER_PROCESSING")],
-                )
-                .unwrap();
-                assert_eq!(point.offsets[0], offset(0, exact));
-            }
-            assert!(
-                checkpoint(
-                    &pipeline(),
-                    vec![offset(0, exact + 1)],
-                    vec![row(0, max_offset, "AFTER_PROCESSING")],
-                )
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn partitions_are_derived_independently_from_unordered_state() {
-        let point = checkpoint(
-            &pipeline(),
-            vec![offset(2, 90), offset(0, 10)],
-            vec![
-                row(2, 99, "AFTER_PROCESSING"),
-                row(0, 10, "AFTER_PROCESSING"),
-            ],
-        )
-        .unwrap();
-        assert_eq!(
-            point.offsets,
-            vec![offset(0, 11), offset(1, 0), offset(2, 100)]
-        );
-    }
-
-    #[test]
-    fn rejects_connect_ahead_of_clickhouse() {
-        let error = checkpoint(
-            &pipeline(),
-            vec![offset(0, 11)],
-            vec![row(0, 9, "AFTER_PROCESSING")],
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("ahead"));
-    }
-
-    #[test]
-    fn rejects_unfinished_keeper_state() {
-        let error = checkpoint(
-            &pipeline(),
-            vec![offset(0, 9)],
-            vec![row(0, 9, "BEFORE_PROCESSING")],
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("not safely committed"));
-    }
-
-    #[test]
-    fn rejects_out_of_range_and_duplicate_keeper_partitions() {
-        assert!(checkpoint(&pipeline(), vec![], vec![row(3, 9, "AFTER_PROCESSING")]).is_err());
-        assert!(
-            checkpoint(
-                &pipeline(),
-                vec![],
-                vec![
-                    row(0, 9, "AFTER_PROCESSING"),
-                    row(0, 10, "AFTER_PROCESSING")
-                ]
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_keeper_rows_for_another_topic() {
-        let mut unexpected = row(0, 9, "AFTER_PROCESSING");
-        unexpected.key = "other-0".to_owned();
-        assert!(checkpoint(&pipeline(), vec![], vec![unexpected]).is_err());
-    }
-
-    #[test]
-    fn rejects_unexpected_connect_topic_and_offset_overflow() {
-        let mut unexpected = offset(0, 1);
-        unexpected.partition.kafka_topic = "other".to_owned();
-        assert!(checkpoint(&pipeline(), vec![unexpected], vec![]).is_err());
-        assert!(checkpoint(&pipeline(), vec![offset(3, 1)], vec![]).is_err());
-        assert!(
-            checkpoint(
-                &pipeline(),
-                vec![],
-                vec![row(0, u64::MAX, "AFTER_PROCESSING")]
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_keeper_offset_range() {
-        let mut invalid = row(0, 9, "AFTER_PROCESSING");
-        invalid.min_offset = 10;
-        assert!(checkpoint(&pipeline(), vec![], vec![invalid]).is_err());
-    }
-
-    #[test]
     fn detects_keeper_movement_during_backup() {
-        let checkpoint = checkpoint(
-            &pipeline(),
-            vec![offset(0, 10)],
-            vec![row(0, 9, "AFTER_PROCESSING")],
-        )
-        .unwrap();
-        assert!(require_unchanged_keeper(&checkpoint, vec![row(0, 9, "AFTER_PROCESSING")]).is_ok());
+        let checkpoint = &manifest().connectors[0];
+        assert!(require_unchanged_keeper(checkpoint, vec![row(0, 9, "AFTER_PROCESSING")]).is_ok());
         assert!(
-            require_unchanged_keeper(&checkpoint, vec![row(0, 10, "AFTER_PROCESSING")]).is_err()
+            require_unchanged_keeper(checkpoint, vec![row(0, 10, "AFTER_PROCESSING")]).is_err()
         );
     }
 
