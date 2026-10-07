@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use durable_clickhouse_backup::{config::BackupConfig, controller, preflight, recovery_resource};
+use durable_clickhouse_backup::{
+    config::{BackupConfig, PauseServerConfig},
+    controller, pause, preflight, recovery_resource,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -15,6 +18,7 @@ enum Command {
     ValidateTargets { config: PathBuf },
     PrintRecoveryCrd,
     RecoveryController { config: PathBuf },
+    PauseServer { config: PathBuf },
 }
 
 #[tokio::main]
@@ -32,5 +36,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::RecoveryController { config } => controller::run(&config).await,
+        Command::PauseServer { config } => {
+            let config = PauseServerConfig::from_file(&config)?;
+            pause::run(&config).await
+        }
     }
 }

@@ -19,7 +19,7 @@ pub struct Connect {
 }
 
 #[derive(Deserialize)]
-struct Status {
+pub(crate) struct Status {
     connector: Component,
     tasks: Vec<Component>,
 }
@@ -27,6 +27,18 @@ struct Status {
 #[derive(Deserialize)]
 struct Component {
     state: String,
+}
+
+impl Status {
+    /// The connector and every one of its tasks report `PAUSED`.
+    pub(crate) fn is_paused(&self) -> bool {
+        self.connector.state == "PAUSED" && self.tasks.iter().all(|task| task.state == "PAUSED")
+    }
+
+    /// The connector or any of its tasks report `FAILED`.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.connector.state == "FAILED" || self.tasks.iter().any(|task| task.state == "FAILED")
+    }
 }
 
 impl Connect {
@@ -113,10 +125,11 @@ impl Connect {
         let deadline = Instant::now() + timeout;
         loop {
             let status = self.status(connector).await?;
-            if status.connector.state == "PAUSED"
-                && status.tasks.iter().all(|task| task.state == "PAUSED")
-            {
+            if status.is_paused() {
                 return Ok(());
+            }
+            if status.is_failed() {
+                bail!("connector failed while waiting to pause: {connector}")
             }
             if Instant::now() >= deadline {
                 bail!("connector did not pause: {connector}")
@@ -224,7 +237,7 @@ impl Connect {
         }
     }
 
-    async fn status(&self, connector: &str) -> Result<Status> {
+    pub(crate) async fn status(&self, connector: &str) -> Result<Status> {
         let value = self
             .request(Method::GET, &format!("connectors/{connector}/status"), None)
             .await?;

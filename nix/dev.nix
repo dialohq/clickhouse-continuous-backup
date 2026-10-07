@@ -292,6 +292,45 @@ in {
       };
     };
 
+    processes.pause-server = {
+      packages = [pkgs.cargo pkgs.curl];
+      env = {
+        CONNECT_URL = "dnvr://connect/url";
+        CLICKHOUSE_URL = "dnvr://clickhouse/httpUrl";
+      };
+      command = pkgs.writeShellApplication {
+        name = "durable-sink-pause-server";
+        runtimeInputs = [pkgs.cargo pkgs.rustc pkgs.curl pkgs.minijinja dnvrState];
+        text = ''
+          set -euo pipefail
+          port=$(dnvr-state pick-port port)
+          config="$DNVR_RUNTIME_DIR/pause-server.json"
+
+          minijinja-cli --strict --autoescape none \
+            --define listen="127.0.0.1:$port" \
+            --define connect_url="$CONNECT_URL" \
+            --define clickhouse_url="$CLICKHOUSE_URL" \
+            ${./pause-server-config.json.j2} --output "$config"
+
+          # Run the built binary directly: `cargo run` would not pass SIGTERM on to it.
+          cargo build --manifest-path "$DNVR_ROOT/backup/Cargo.toml"
+          export CLICKHOUSE_USERNAME=default
+
+          ${supervise {
+            name = "Pause server";
+            start = ''"$DNVR_ROOT/backup/target/debug/durable-clickhouse-backup" pause-server "$config"'';
+            readyWhen = ''curl --fail --silent "http://127.0.0.1:$port/health" >/dev/null'';
+            onReady = ''
+              dnvr-state set host 127.0.0.1
+              dnvr-state set port "$port"
+              dnvr-state set url "http://127.0.0.1:$port"
+              echo "Pause server ready at http://127.0.0.1:$port"
+            '';
+          }}
+        '';
+      };
+    };
+
     processes.connect = {
       packages = [pkgs.apacheKafka pkgs.curl];
       env.KAFKA_BOOTSTRAP_SERVERS = "dnvr://redpanda/bootstrapServers";
