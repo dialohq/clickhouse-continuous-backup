@@ -7,16 +7,29 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
-/// Pauses handed out by `/pause`, kept in memory until `/resume` releases them.
+/// One token's pause: the connectors it holds and when it lapses unless renewed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct Pause {
+    pub(super) connectors: Vec<String>,
+    pub(super) expires_at: DateTime<Utc>,
+}
+
+/// Pauses handed out by `/pause`, kept until `/resume` releases them or they expire.
 ///
 /// A connector can be held by several tokens and is only resumed once the last one releases it.
 /// Connectors paused outside this server are never held, so they are never resumed here.
 #[derive(Default)]
 pub(super) struct Pauses {
-    tokens: HashMap<Uuid, Vec<String>>,
+    tokens: HashMap<Uuid, Pause>,
     holders: HashMap<String, HashSet<Uuid>>,
+    /// Each token's expiry task, aborted once the token is gone for good.
+    expiries: HashMap<Uuid, AbortHandle>,
 }
 
 impl Pauses {
@@ -30,11 +43,11 @@ impl Pauses {
                     .with_context(|| format!("failed to read pauses from {}", path.display()));
             }
         };
-        let tokens: HashMap<Uuid, Vec<String>> = serde_json::from_str(&contents)
+        let tokens: HashMap<Uuid, Pause> = serde_json::from_str(&contents)
             .with_context(|| format!("invalid pauses in {}", path.display()))?;
         let mut pauses = Self::default();
-        for (token, connectors) in tokens {
-            pauses.hold(token, connectors);
+        for (token, pause) in tokens {
+            pauses.hold(token, pause);
         }
         Ok(pauses)
     }
@@ -60,23 +73,49 @@ impl Pauses {
         self.holders.contains_key(connector)
     }
 
-    pub(super) fn connectors(&self, token: &Uuid) -> Option<&[String]> {
-        self.tokens.get(token).map(Vec::as_slice)
+    pub(super) fn get(&self, token: &Uuid) -> Option<&Pause> {
+        self.tokens.get(token)
     }
 
-    pub(super) fn hold(&mut self, token: Uuid, connectors: Vec<String>) {
-        for connector in &connectors {
+    pub(super) fn tokens(&self) -> Vec<Uuid> {
+        self.tokens.keys().copied().collect()
+    }
+
+    pub(super) fn hold(&mut self, token: Uuid, pause: Pause) {
+        for connector in &pause.connectors {
             self.holders
                 .entry(connector.clone())
                 .or_default()
                 .insert(token);
         }
-        self.tokens.insert(token, connectors);
+        self.tokens.insert(token, pause);
+    }
+
+    pub(super) fn track_expiry(&mut self, token: Uuid, task: AbortHandle) {
+        self.expiries.insert(token, task);
+    }
+
+    pub(super) fn stop_expiry(&mut self, token: &Uuid) {
+        if let Some(task) = self.expiries.remove(token) {
+            task.abort();
+        }
+    }
+
+    /// Moves the token's expiry; returns false if the token is unknown.
+    pub(super) fn renew(&mut self, token: &Uuid, expires_at: DateTime<Utc>) -> bool {
+        match self.tokens.get_mut(token) {
+            Some(pause) => {
+                pause.expires_at = expires_at;
+                true
+            }
+            None => false,
+        }
     }
 
     /// The token's connectors that no other token holds, i.e. the ones releasing it would resume.
     pub(super) fn held_only_by(&self, token: &Uuid) -> Vec<String> {
-        self.connectors(token)
+        self.get(token)
+            .map(|pause| pause.connectors.as_slice())
             .unwrap_or_default()
             .iter()
             .filter(|connector| {
@@ -90,8 +129,9 @@ impl Pauses {
 
     /// Removes the token and returns its connectors that no other token holds any more.
     pub(super) fn release(&mut self, token: &Uuid) -> Option<Vec<String>> {
-        let connectors = self.tokens.remove(token)?;
-        let released = connectors
+        let pause = self.tokens.remove(token)?;
+        let released = pause
+            .connectors
             .into_iter()
             .filter(|connector| match self.holders.get_mut(connector) {
                 Some(holders) => {
@@ -144,12 +184,22 @@ mod tests {
 
     use super::*;
 
+    fn pause(connectors: &[&str]) -> Pause {
+        Pause {
+            connectors: connectors
+                .iter()
+                .map(|&connector| connector.to_owned())
+                .collect(),
+            expires_at: DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+        }
+    }
+
     #[test]
     fn connector_is_released_only_by_its_last_holder() {
         let (first, second) = (Uuid::from_u128(1), Uuid::from_u128(2));
         let mut pauses = Pauses::default();
-        pauses.hold(first, vec!["a".to_owned(), "b".to_owned()]);
-        pauses.hold(second, vec!["b".to_owned()]);
+        pauses.hold(first, pause(&["a", "b"]));
+        pauses.hold(second, pause(&["b"]));
 
         assert_eq!(pauses.held_only_by(&first), vec!["a".to_owned()]);
         assert_eq!(pauses.release(&first), Some(vec!["a".to_owned()]));
@@ -165,10 +215,22 @@ mod tests {
         let token = Uuid::from_u128(1);
         let mut pauses = Pauses::default();
         assert_eq!(pauses.release(&token), None);
-        pauses.hold(token, vec!["a".to_owned()]);
+        assert!(!pauses.renew(&token, Utc::now()));
+        pauses.hold(token, pause(&["a"]));
         assert!(pauses.release(&token).is_some());
         assert_eq!(pauses.release(&token), None);
-        assert_eq!(pauses.connectors(&token), None);
+        assert_eq!(pauses.get(&token), None);
+    }
+
+    #[test]
+    fn renewal_moves_only_the_expiry() {
+        let token = Uuid::from_u128(1);
+        let mut pauses = Pauses::default();
+        pauses.hold(token, pause(&["a"]));
+        let later = DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+        assert!(pauses.renew(&token, later));
+        assert_eq!(pauses.get(&token).unwrap().expires_at, later);
+        assert_eq!(pauses.get(&token).unwrap().connectors, vec!["a".to_owned()]);
     }
 
     #[test]
@@ -179,8 +241,8 @@ mod tests {
 
         let (first, second) = (Uuid::from_u128(1), Uuid::from_u128(2));
         let mut pauses = Pauses::default();
-        pauses.hold(first, vec!["a".to_owned(), "b".to_owned()]);
-        pauses.hold(second, vec!["b".to_owned()]);
+        pauses.hold(first, pause(&["a", "b"]));
+        pauses.hold(second, pause(&["b"]));
         pauses.save(&path).unwrap();
 
         let loaded = Pauses::load(&path).unwrap();

@@ -26,6 +26,7 @@ struct AppState {
     clickhouse: ClickHouse,
     pipelines: Arc<[Pipeline]>,
     pause_timeout: Duration,
+    ttl: Duration,
     /// Held for the whole of each `/pause` and `/resume` request, so they run one at a time.
     pauses: Arc<Mutex<Pauses>>,
     pauses_file: Arc<Path>,
@@ -45,13 +46,23 @@ pub async fn run(config: &PauseServerConfig) -> Result<()> {
         )?,
         pipelines: config.pipelines.clone().into(),
         pause_timeout: config.pause_timeout,
+        ttl: config.pause_ttl,
         pauses: Arc::new(Mutex::new(pauses)),
         pauses_file: config.pauses_file.as_path().into(),
     };
+    // Tokens loaded from the file expire like any other, including ones already past due.
+    {
+        let mut pauses = state.pauses.lock().await;
+        for token in pauses.tokens() {
+            let expiry_task = tokio::spawn(handlers::expire_when_due(state.clone(), token));
+            pauses.track_expiry(token, expiry_task.abort_handle());
+        }
+    }
     let app = Router::new()
         .route("/health", get(health))
         .route("/pause", post(handlers::pause))
         .route("/resume", post(handlers::resume))
+        .route("/renew", post(handlers::renew))
         .with_state(state);
     let listener = TcpListener::bind(config.listen)
         .await

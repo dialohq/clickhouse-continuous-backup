@@ -7,13 +7,16 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::{join_all, try_join_all};
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use super::{
     AppState,
-    api::{PauseRequest, PauseResponse, ResumeRequest},
+    api::{PauseRequest, PauseResponse, RenewRequest, ResumeRequest},
     offsets::read_offsets,
+    registry::{Pause, Pauses},
 };
 
 pub(super) async fn pause(
@@ -74,18 +77,27 @@ pub(super) async fn pause(
     // Register the pause before touching Connect, so every connector it pauses is accounted for.
     // It holds all of them, including ones another token already holds, so releasing that token
     // can't resume them under this one.
+    // The expiry also covers a crash during this request: the reloaded token lapses on its own.
     let token = Uuid::new_v4();
     pauses.hold(
         token,
-        connectors
-            .iter()
-            .map(|&connector| connector.to_owned())
-            .collect(),
+        Pause {
+            connectors: connectors
+                .iter()
+                .map(|&connector| connector.to_owned())
+                .collect(),
+            expires_at: expiry(state.ttl),
+        },
     );
     if let Err(error) = pauses.save(&state.pauses_file) {
         pauses.release(&token);
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
     }
+    // Started now rather than on success: if the client disconnects, axum drops this handler
+    // midway and the expiry is what resumes whatever it already paused. It can't act before this
+    // request releases the lock.
+    let expiry_task = tokio::spawn(expire_when_due(state.clone(), token));
+    pauses.track_expiry(token, expiry_task.abort_handle());
 
     let running = connectors
         .iter()
@@ -110,10 +122,22 @@ pub(super) async fn pause(
     }
     .await;
     match result {
-        Ok(watermark) => Json(PauseResponse { token, watermark }).into_response(),
-        Err(error) => {
-            let released = pauses.release(&token).unwrap_or_default();
+        Ok(watermark) => {
+            // The TTL counts from the response, not from the start of the request.
+            pauses.renew(&token, expiry(state.ttl));
             if let Err(error) = pauses.save(&state.pauses_file) {
+                eprintln!("failed to save the expiry of pause {token}: {error:#}");
+            }
+            Json(PauseResponse {
+                token,
+                ttl_seconds: state.ttl.as_secs(),
+                watermark,
+            })
+            .into_response()
+        }
+        Err(error) => {
+            let released = pauses.held_only_by(&token);
+            if let Err(error) = forget(&state, &mut pauses, &token) {
                 eprintln!("failed to remove pause {token} after a failed /pause: {error:#}");
             }
             // Best effort: a failure cancels the other pauses, any of which may already be paused.
@@ -133,7 +157,10 @@ pub(super) async fn resume(
     Json(request): Json<ResumeRequest>,
 ) -> Response {
     let mut pauses = state.pauses.lock().await;
-    let Some(connectors) = pauses.connectors(&request.token).map(<[String]>::to_vec) else {
+    let Some(connectors) = pauses
+        .get(&request.token)
+        .map(|pause| pause.connectors.clone())
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let statuses = match try_join_all(
@@ -160,20 +187,102 @@ pub(super) async fn resume(
 
     // The token is only removed once its connectors are running again, so a failed resume can be
     // retried with the same token.
-    let released = pauses.held_only_by(&request.token);
-    let resumes = released
-        .iter()
-        .map(|connector| resume_connector(&state, connector));
-    if let Err(error) = try_join_all(resumes).await {
+    if let Err(error) = resume_held_connectors(&state, &pauses, &request.token).await {
         return (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response();
     }
-    pauses.release(&request.token);
-    if let Err(error) = pauses.save(&state.pauses_file) {
-        // Keep the token in memory as the file still has it, so the resume can be retried.
-        pauses.hold(request.token, connectors);
+    if let Err(error) = forget(&state, &mut pauses, &request.token) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
     }
     StatusCode::OK.into_response()
+}
+
+pub(super) async fn renew(
+    State(state): State<AppState>,
+    Json(request): Json<RenewRequest>,
+) -> Response {
+    let mut pauses = state.pauses.lock().await;
+    let Some(previous) = pauses.get(&request.token).map(|pause| pause.expires_at) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    pauses.renew(&request.token, expiry(state.ttl));
+    if let Err(error) = pauses.save(&state.pauses_file) {
+        pauses.renew(&request.token, previous);
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
+    }
+    StatusCode::OK.into_response()
+}
+
+/// Waits until the token expires, then resumes its connectors as `/resume` would.
+///
+/// A `/renew` moves the expiry while this sleeps, so it checks again under the lock before acting.
+pub(super) async fn expire_when_due(state: AppState, token: Uuid) {
+    loop {
+        let Some(expires_at) = state
+            .pauses
+            .lock()
+            .await
+            .get(&token)
+            .map(|pause| pause.expires_at)
+        else {
+            return;
+        };
+        sleep((expires_at - Utc::now()).to_std().unwrap_or_default()).await;
+
+        let mut pauses = state.pauses.lock().await;
+        match pauses.get(&token) {
+            None => return,
+            Some(pause) if pause.expires_at > Utc::now() => continue,
+            Some(_) => {}
+        }
+        eprintln!("pause {token} expired, resuming its connectors");
+        let result = match resume_held_connectors(&state, &pauses, &token).await {
+            Ok(()) => forget(&state, &mut pauses, &token),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("failed to resume expired pause {token}, retrying: {error:#}");
+                pauses.renew(&token, expiry(state.ttl / 3));
+            }
+        }
+    }
+}
+
+/// Resumes the token's connectors that no other token holds and waits for them to run.
+async fn resume_held_connectors(state: &AppState, pauses: &Pauses, token: &Uuid) -> Result<()> {
+    try_join_all(
+        pauses
+            .held_only_by(token)
+            .iter()
+            .map(|connector| resume_connector(state, connector)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Removes the token, saves the file and stops the token's expiry task.
+///
+/// On a failed save the token is kept, as the file still has it, and so is its expiry task.
+/// Called from the expiry task itself it aborts that task too, which then returns without awaiting.
+fn forget(state: &AppState, pauses: &mut Pauses, token: &Uuid) -> Result<()> {
+    let Some(pause) = pauses.get(token).cloned() else {
+        return Ok(());
+    };
+    pauses.release(token);
+    if let Err(error) = pauses.save(&state.pauses_file) {
+        pauses.hold(*token, pause);
+        return Err(error);
+    }
+    pauses.stop_expiry(token);
+    Ok(())
+}
+
+fn expiry(ttl: std::time::Duration) -> DateTime<Utc> {
+    TimeDelta::from_std(ttl)
+        .ok()
+        .and_then(|ttl| Utc::now().checked_add_signed(ttl))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 async fn resume_connector(state: &AppState, connector: &str) -> Result<()> {
