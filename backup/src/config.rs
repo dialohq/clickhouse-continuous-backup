@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env, fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -127,6 +128,23 @@ pub struct ControllerConfig {
     pub timeouts: RuntimeTimeouts,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PauseServerConfig {
+    pub listen: SocketAddr,
+    pub connect_url: String,
+    pub clickhouse_url: String,
+    pub clickhouse_properties_file: Option<PathBuf>,
+    #[serde(skip)]
+    pub clickhouse_username: String,
+    #[serde(skip)]
+    pub clickhouse_password: String,
+    #[serde(rename = "pauseTimeoutSeconds", deserialize_with = "positive_seconds")]
+    pub pause_timeout: Duration,
+    pub pipelines: Vec<Pipeline>,
+    pub timeouts: RuntimeTimeouts,
+}
+
 fn positive_seconds<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Duration, D::Error> {
@@ -192,6 +210,28 @@ impl TargetConfig {
             .cloned()
             .context("ClickHouse username property is required")?;
         config.clickhouse_password = credentials.get("password").cloned().unwrap_or_default();
+        Ok(config)
+    }
+}
+
+impl PauseServerConfig {
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let mut config: Self = read_config(path)?;
+        validate_pipelines(&config.pipelines)?;
+        if let Some(path) = &config.clickhouse_properties_file {
+            let credentials = read_properties(path, "ClickHouse")?;
+            config.clickhouse_username = credentials
+                .get("username")
+                .cloned()
+                .context("ClickHouse username property is required")?;
+            config.clickhouse_password = credentials.get("password").cloned().unwrap_or_default();
+        } else {
+            config.clickhouse_username = required("CLICKHOUSE_USERNAME")?;
+            config.clickhouse_password = env::var("CLICKHOUSE_PASSWORD").unwrap_or_default();
+        }
+        if config.clickhouse_username.is_empty() {
+            bail!("ClickHouse username is required")
+        }
         Ok(config)
     }
 }

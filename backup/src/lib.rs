@@ -6,6 +6,7 @@ pub mod controller;
 mod kafka;
 mod metadata;
 pub mod model;
+pub mod pause;
 pub mod preflight;
 pub mod recovery_resource;
 mod replay;

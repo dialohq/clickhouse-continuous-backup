@@ -1,0 +1,28 @@
+{
+  "listen": {{ listen | tojson }},
+  "connectUrl": {{ connect_url | tojson }},
+  "clickhouseUrl": {{ clickhouse_url | tojson }},
+  "pauseTimeoutSeconds": 30,
+  "pipelines": [{
+    "connector": "durable-clickhouse-sink-records",
+    "database": "durable_e2e",
+    "state_table": "durable_clickhouse_sink_records_state",
+    "keeper_path": "/durable-clickhouse-sink/e2e/records",
+    "table": "records",
+    "topic": "records.input",
+    "partitions": 3
+  }],
+  "timeouts": {
+    "clickhouseConnectSeconds": 10,
+    "connectConnectSeconds": 10,
+    "connectRequestSeconds": 30,
+    "connectPollSeconds": 1,
+    "kafkaMetadataSeconds": 10,
+    "kafkaCatalogReadSeconds": 15,
+    "kafkaTransactionSeconds": 30,
+    "kafkaMaxPollSeconds": 86400,
+    "kafkaReplayPollSeconds": 15,
+    "recoveryCatchupSeconds": 3600,
+    "controllerRetrySeconds": 15
+  }
+}
