@@ -132,6 +132,8 @@ pub struct ControllerConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PauseServerConfig {
     pub listen: SocketAddr,
+    /// Where tokens are persisted; `<file>.lock` next to it guards against a second server.
+    pub pauses_file: PathBuf,
     pub connect_url: String,
     pub clickhouse_url: String,
     pub clickhouse_properties_file: Option<PathBuf>,

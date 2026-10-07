@@ -305,9 +305,12 @@ in {
           set -euo pipefail
           port=$(dnvr-state pick-port port)
           config="$DNVR_RUNTIME_DIR/pause-server.json"
+          data="$DNVR_STATE/data/pause-server"
+          mkdir -p "$data"
 
           minijinja-cli --strict --autoescape none \
             --define listen="127.0.0.1:$port" \
+            --define pauses_file="$data/pauses.json" \
             --define connect_url="$CONNECT_URL" \
             --define clickhouse_url="$CLICKHOUSE_URL" \
             ${./pause-server-config.json.j2} --output "$config"
