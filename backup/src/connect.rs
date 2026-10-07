@@ -35,6 +35,13 @@ impl Status {
         self.connector.state == "PAUSED" && self.tasks.iter().all(|task| task.state == "PAUSED")
     }
 
+    /// The connector and every one of its tasks, of which there is at least one, report `RUNNING`.
+    pub(crate) fn is_running(&self) -> bool {
+        self.connector.state == "RUNNING"
+            && !self.tasks.is_empty()
+            && self.tasks.iter().all(|task| task.state == "RUNNING")
+    }
+
     /// The connector or any of its tasks report `FAILED`.
     pub(crate) fn is_failed(&self) -> bool {
         self.connector.state == "FAILED" || self.tasks.iter().any(|task| task.state == "FAILED")
