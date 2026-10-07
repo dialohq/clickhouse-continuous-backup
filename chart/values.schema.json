@@ -194,6 +194,37 @@
         "replayBatchRecords": {"type": "integer", "minimum": 1, "maximum": 100000},
         "resources": {"type": "object"}
       }
+    },
+    "pauseServer": {
+      "type": "object",
+      "required": ["enabled", "port", "ttlSeconds", "pauseTimeoutSeconds", "credentialsSecret", "persistence"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
+        "serviceAccountName": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "ttlSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "pauseTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "logLevel": {"type": "string"},
+        "credentialsFile": {"type": "string", "pattern": "^$|^/[^:\r\n]+$"},
+        "credentialsSecret": {
+          "type": "object",
+          "required": ["name", "propertiesKey"],
+          "properties": {
+            "name": {"type": "string"},
+            "propertiesKey": {"type": "string", "minLength": 1}
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "required": ["size"],
+          "properties": {
+            "storageClass": {"type": "string"},
+            "size": {"type": "string", "minLength": 1}
+          }
+        },
+        "resources": {"type": "object"}
+      }
     }
   }
 }
