@@ -88,6 +88,33 @@
       runHook postInstall
     '';
   };
+  # Redpanda has no macOS build, so on Darwin it runs as a Docker container on
+  # the host network, binding the same 127.0.0.1 ports as the native binary.
+  # Its data lives in a named volume: Redpanda's direct I/O asserts on the
+  # 1MiB alignment reported by macOS bind mounts.
+  inherit (pkgs.stdenv.hostPlatform) isLinux;
+  redpandaImage = "docker.redpanda.com/redpandadata/redpanda:v26.2.2";
+  redpandaFlags = "--smp 1 --memory 1G --reserve-memory 0M --overprovisioned --lock-memory=false --unsafe-bypass-fsync=true";
+  redpandaRuntime =
+    if isLinux
+    then redpanda
+    else pkgs.docker-client;
+  redpandaDataDir =
+    if isLinux
+    then ''"$data"''
+    else "/var/lib/redpanda/data";
+  redpandaExec =
+    if isLinux
+    then ''redpanda --redpanda-cfg "$config" ${redpandaFlags}''
+    else ''
+      docker run --rm --name "$container" \
+        --network host \
+        --volume "$config:/etc/redpanda/redpanda.yaml" \
+        --volume "$container:/var/lib/redpanda/data" \
+        --entrypoint /opt/redpanda/bin/redpanda \
+        ${redpandaImage} \
+        --redpanda-cfg /etc/redpanda/redpanda.yaml ${redpandaFlags}
+    '';
 in {
   dnvr.shells.default = {
     description = "Durable ClickHouse sink development services";
@@ -105,7 +132,7 @@ in {
       pkgs.minio
       pkgs.minio-client
       pkgs.redpanda-client
-      redpanda
+      redpandaRuntime
       pkgs.cargo
       pkgs.rustc
       pkgs.rust-analyzer
@@ -170,10 +197,10 @@ in {
     };
 
     processes.redpanda = {
-      packages = [redpanda pkgs.curl];
+      packages = [redpandaRuntime pkgs.curl];
       command = pkgs.writeShellApplication {
         name = "durable-sink-redpanda";
-        runtimeInputs = [redpanda pkgs.curl pkgs.minijinja dnvrState];
+        runtimeInputs = [redpandaRuntime pkgs.curl pkgs.minijinja dnvrState];
         text = ''
           set -euo pipefail
           kafka_port=$(dnvr-state pick-port port)
@@ -188,17 +215,17 @@ in {
             --define kafka_port="$kafka_port" \
             --define admin_port="$admin_port" \
             --define rpc_port="$rpc_port" \
-            --define data_dir="$data" \
+            --define data_dir=${redpandaDataDir} \
             ${./redpanda.yaml.j2} --output "$config"
+          ${pkgs.lib.optionalString (!isLinux) ''
+            container="durable-sink-redpanda-$(printf '%s' "$DNVR_STATE" | cksum | cut -d ' ' -f 1)"
+            # A previous run killed without cleanup may have left the container behind.
+            docker rm --force "$container" >/dev/null 2>&1 || true
+          ''}
 
           ${supervise {
             name = "Redpanda";
-            start = ''
-              redpanda --redpanda-cfg "$config" \
-                --smp 1 --memory 1G --reserve-memory 0M \
-                --overprovisioned --lock-memory=false \
-                --unsafe-bypass-fsync=true
-            '';
+            start = redpandaExec;
             readyWhen = ''curl --fail --silent "http://127.0.0.1:$admin_port/v1/status/ready" >/dev/null'';
             onReady = ''
               curl --fail-with-body --silent --show-error \
@@ -333,6 +360,7 @@ in {
             sleep 0.2
           done
           until [[ $(clickhouse-client \
+            --user default \
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --query "EXISTS durable_e2e.records") == 1 ]]; do
@@ -372,6 +400,7 @@ in {
             *) echo "Unsupported database engine: $CLICKHOUSE_DATABASE_ENGINE" >&2; exit 1 ;;
           esac
           clickhouse-client \
+            --user default \
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --query "CREATE DATABASE IF NOT EXISTS durable_e2e ENGINE = $database_engine"
@@ -380,6 +409,7 @@ in {
             --define database_engine="$CLICKHOUSE_DATABASE_ENGINE" \
             "$SCHEMA_FILE" --output "$schema"
           clickhouse-client \
+            --user default \
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --multiquery \
