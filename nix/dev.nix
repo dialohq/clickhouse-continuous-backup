@@ -129,6 +129,8 @@ in {
       pkgs.clickhouse
       pkgs.curl
       pkgs.jq
+      # The same tmux build dnvr's runner uses, so clients match its server.
+      pkgs.tmux
       pkgs.kubeconform
       pkgs.kubectl
       pkgs.kubernetes-helm
@@ -224,6 +226,8 @@ in {
             container="durable-sink-redpanda-$(printf '%s' "$DNVR_STATE" | cksum | cut -d ' ' -f 1)"
             # A previous run killed without cleanup may have left the container behind.
             docker rm --force "$container" >/dev/null 2>&1 || true
+            # The container and its data volume share this name; the e2e tests remove both.
+            dnvr-state set container "$container"
           ''}
 
           ${supervise {

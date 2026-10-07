@@ -79,11 +79,6 @@ impl DnvrBackend {
         self.instance.path()
     }
 
-    fn tmux_executable(&self) -> Result<PathBuf> {
-        let pid = self.server_pid.context("tmux server has not started")?;
-        Ok(std::fs::read_link(format!("/proc/{pid}/exe"))?)
-    }
-
     async fn log_tail(&self, process: &str) -> String {
         let log = self
             .timings
@@ -166,7 +161,7 @@ impl DnvrBackend {
     async fn discover_api(&self, deadline: Instant) -> Result<String> {
         let socket = self.instance.path().join("runtime/tmux-default-up.sock");
         loop {
-            let output = Command::new(self.tmux_executable()?)
+            let output = Command::new("tmux")
                 .arg("-S")
                 .arg(&socket)
                 .args(["show-option", "-gv", "@dnvr_sidebar_api_url"])
@@ -178,11 +173,6 @@ impl DnvrBackend {
                     return Ok(url);
                 }
             }
-            if let Some(server_pid) = self.server_pid
-                && let Some(url) = sidebar_api_url(server_pid)?
-            {
-                return Ok(url);
-            }
             if Instant::now() >= deadline {
                 bail!(
                     "timed out discovering the dnvr API through {}",
@@ -193,25 +183,42 @@ impl DnvrBackend {
         }
     }
 
-    fn discover_server_pid(&self) -> Result<u32> {
-        let socket = self.instance.path().join("runtime/tmux-default-up.sock");
-        for entry in std::fs::read_dir("/proc")?.flatten() {
-            if std::fs::read_to_string(entry.path().join("comm"))
-                .unwrap_or_default()
-                .trim()
-                != "tmux: server"
-            {
-                continue;
-            }
-            let command = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
-            if command
-                .split(|byte| *byte == 0)
-                .any(|arg| arg == socket.as_os_str().as_encoded_bytes())
-            {
-                return Ok(entry.file_name().to_string_lossy().parse()?);
-            }
+    /// Asks the tmux server for its PID; works the same on Linux and macOS.
+    async fn discover_server_pid(&self, socket: &Path) -> Result<u32> {
+        let output = Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .args(["display-message", "-p", "#{pid}"])
+            .output()
+            .await
+            .context("run tmux; run the test from `nix develop`")?;
+        if !output.status.success() {
+            bail!(
+                "cannot find tmux server for {}: {}",
+                socket.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
         }
-        bail!("cannot find tmux server for {}", socket.display())
+        Ok(String::from_utf8(output.stdout)?.trim().parse()?)
+    }
+
+    /// On macOS Redpanda runs in Docker; its container and data volume outlive the processes.
+    fn remove_redpanda_container(&self) {
+        let path = self.instance.path().join("runtime/redpanda/container");
+        let Ok(container) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let container = container.trim();
+        for args in [
+            vec!["rm", "--force", container],
+            vec!["volume", "rm", container],
+        ] {
+            let _ = std::process::Command::new("docker")
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 
     fn signal_process_tree(&self, signal: i32) {
@@ -299,16 +306,11 @@ impl EnvironmentBackend for DnvrBackend {
             .await?;
         // Record the server before waiting for services, so failed startup
         // still cleans up the tmux session even if ClickHouse already exited.
-        self.server_pid = Some(self.discover_server_pid()?);
-        // Use the server's own executable: a system tmux client may be a
-        // different version from the one dnvr obtained through Nix.
+        self.server_pid = Some(self.discover_server_pid(&socket).await?);
+        // `tmux` is the dev shell's, the same build dnvr's runner starts the server with.
         eprintln!(
-            "[{}] watch: '{}' -S '{}' attach-session -t dnvr",
+            "[{}] watch: tmux -S '{}' attach-session -t dnvr",
             self.timings.name,
-            self.tmux_executable()?
-                .display()
-                .to_string()
-                .replace('\'', "'\\''"),
             socket.display().to_string().replace('\'', "'\\''")
         );
 
@@ -422,57 +424,6 @@ impl Drop for DnvrBackend {
     fn drop(&mut self) {
         self.signal_process_tree(libc::SIGTERM);
         self.signal_process_tree(libc::SIGKILL);
+        self.remove_redpanda_container();
     }
-}
-
-fn sidebar_api_url(server_pid: u32) -> Result<Option<String>> {
-    let sidebar_pid = std::fs::read_dir("/proc")?
-        .filter_map(Result::ok)
-        .find_map(|entry| {
-            let pid = entry.file_name().to_string_lossy().parse::<u32>().ok()?;
-            let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
-            let parent = status
-                .lines()
-                .find_map(|line| line.strip_prefix("PPid:")?.trim().parse::<u32>().ok())?;
-            let name = status
-                .lines()
-                .find_map(|line| line.strip_prefix("Name:\t"))?;
-            (parent == server_pid && name.starts_with("dnvr-tmux-sideb")).then_some(pid)
-        });
-    let Some(sidebar_pid) = sidebar_pid else {
-        return Ok(None);
-    };
-
-    let sockets: Vec<_> = std::fs::read_dir(format!("/proc/{sidebar_pid}/fd"))?
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_link(entry.path()).ok())
-        .filter_map(|target| {
-            let target = target.to_string_lossy();
-            target
-                .strip_prefix("socket:[")?
-                .strip_suffix(']')?
-                .parse::<u64>()
-                .ok()
-        })
-        .collect();
-    let tcp = std::fs::read_to_string(format!("/proc/{sidebar_pid}/net/tcp"))?;
-    for line in tcp.lines().skip(1) {
-        let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() < 10 || fields[3] != "0A" {
-            continue;
-        }
-        let Some((address, port)) = fields[1].split_once(':') else {
-            continue;
-        };
-        let Ok(inode) = fields[9].parse::<u64>() else {
-            continue;
-        };
-        if address == "0100007F" && sockets.contains(&inode) {
-            return Ok(Some(format!(
-                "http://127.0.0.1:{}",
-                u16::from_str_radix(port, 16)?
-            )));
-        }
-    }
-    Ok(None)
 }
