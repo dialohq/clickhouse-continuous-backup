@@ -20,17 +20,21 @@
 {{- end }}
 {{- end }}
 {{- end }}
-{{- range $name := list "clickhouse" "backup" "recovery" }}
+{{- if and .Values.backup.enabled (not .Values.pauseServer.enabled) }}
+{{- fail "backup.enabled requires pauseServer.enabled: the backup pauses ingestion through the pause server" }}
+{{- end }}
+{{- range $name := list "clickhouse" "backup" "recovery" "pauseServer" }}
 {{- $config := index $.Values $name }}
-{{- if or (ne $name "backup") $.Values.backup.enabled }}
+{{- if and (or (ne $name "backup") $.Values.backup.enabled) (or (ne $name "pauseServer") $.Values.pauseServer.enabled) }}
 {{- if eq (empty $config.credentialsFile) (empty $config.credentialsSecret.name) }}
 {{- fail (printf "set exactly one of %s.credentialsFile or %s.credentialsSecret.name" $name $name) }}
 {{- end }}
 {{- end }}
 {{- end }}
-{{- $minimumResumeGrace := mul (len .Values.pipelines) (int .Values.timeouts.connectRequestSeconds) }}
+{{- /* On SIGTERM the backup resumes at most one outstanding pause through a single /resume call. */}}
+{{- $minimumResumeGrace := add (int .Values.backup.pauseTimeoutSeconds) (int .Values.timeouts.connectRequestSeconds) }}
 {{- if le (int .Values.backup.terminationGracePeriodSeconds) (int $minimumResumeGrace) }}
-{{- fail "backup.terminationGracePeriodSeconds must exceed connectRequestSeconds multiplied by the pipeline count" }}
+{{- fail "backup.terminationGracePeriodSeconds must exceed backup.pauseTimeoutSeconds plus timeouts.connectRequestSeconds" }}
 {{- end }}
 {{- range $segment := splitList "/" (trimSuffix "/" .Values.backup.pathPrefix) }}
 {{- if or (eq $segment "") (eq $segment ".") (eq $segment "..") }}

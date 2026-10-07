@@ -73,6 +73,7 @@
             --set backup.enabled=true
             --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
             --set-string recovery.credentialsSecret.name=clickhouse-recovery-credentials
+            --set-string pauseServer.credentialsSecret.name=clickhouse-pause-credentials
             --set backup.maxIncrementalsPerFull=2
             --set backup.maxBandwidthBytesPerSecond=1048576
           )
