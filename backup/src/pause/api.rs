@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::model::{KafkaOffset, KeeperRow, Pipeline};
 
 /// Selects pipelines by exactly one key, e.g. `{"topic": "records.input"}`.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PauseRequest {
     Topic(String),

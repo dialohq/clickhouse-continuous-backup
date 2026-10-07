@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::task::AbortHandle;
+use tracing::debug;
 use uuid::Uuid;
 
 /// One token's pause: the connectors it holds and when it lapses unless renewed.
@@ -66,7 +67,9 @@ impl Pauses {
                 .filter(|parent| !parent.as_os_str().is_empty());
             File::open(directory.unwrap_or(Path::new(".")))?.sync_all()
         };
-        write().with_context(|| format!("failed to save pauses to {}", path.display()))
+        write().with_context(|| format!("failed to save pauses to {}", path.display()))?;
+        debug!(tokens = self.tokens.len(), "saved pauses");
+        Ok(())
     }
 
     pub(super) fn is_held(&self, connector: &str) -> bool {

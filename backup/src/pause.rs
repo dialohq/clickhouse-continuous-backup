@@ -16,6 +16,8 @@ use axum::{
     routing::{get, post},
 };
 use tokio::{net::TcpListener, sync::Mutex};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::{Level, error, info};
 
 use crate::{clickhouse::ClickHouse, config::PauseServerConfig, connect::Connect, model::Pipeline};
 use registry::{Pauses, lock_pauses_file};
@@ -34,8 +36,16 @@ struct AppState {
 
 pub async fn run(config: &PauseServerConfig) -> Result<()> {
     // Kept until the server stops; the OS releases it if the process dies.
-    let _lock = lock_pauses_file(&config.pauses_file)?;
+    let _lock = lock_pauses_file(&config.pauses_file)
+        .inspect_err(|error| error!("cannot start the pause server: {error:#}"))?;
+    info!(file = %config.pauses_file.display(), "locked the pauses file");
     let pauses = Pauses::load(&config.pauses_file)?;
+    info!(
+        tokens = pauses.tokens().len(),
+        ttl_seconds = config.pause_ttl.as_secs(),
+        pipelines = config.pipelines.len(),
+        "loaded pauses"
+    );
     let state = AppState {
         connect: Connect::new(config.connect_url.clone(), &config.timeouts)?,
         clickhouse: ClickHouse::new(
@@ -63,10 +73,16 @@ pub async fn run(config: &PauseServerConfig) -> Result<()> {
         .route("/pause", post(handlers::pause))
         .route("/resume", post(handlers::resume))
         .route("/renew", post(handlers::renew))
-        .with_state(state);
+        .with_state(state)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        );
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("failed to bind pause server to {}", config.listen))?;
+    info!(listen = %config.listen, "pause server listening");
     axum::serve(listener, app)
         .await
         .context("pause server failed")

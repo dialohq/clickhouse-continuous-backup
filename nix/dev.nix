@@ -473,6 +473,8 @@ in {
     env = {
       MINIO_ROOT_USER = "durable-e2e";
       MINIO_ROOT_PASSWORD = "durable-e2e-secret";
+      # Only the application's own logs; dependencies such as tower_http stay silent.
+      RUST_LOG = "off,durable_clickhouse_backup=info";
     };
   };
 }
