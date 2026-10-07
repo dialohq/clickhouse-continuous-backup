@@ -8,45 +8,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::future::{join_all, try_join_all};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
     AppState,
-    offsets::{PipelineOffsets, read_offsets},
+    api::{PauseRequest, PauseResponse, ResumeRequest},
+    offsets::read_offsets,
 };
-use crate::model::Pipeline;
-
-/// Selects pipelines by exactly one key, e.g. `{"topic": "records.input"}`.
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(super) enum PauseRequest {
-    Topic(String),
-    Connector(String),
-    Table(String),
-}
-
-#[derive(Serialize)]
-struct PauseResponse {
-    token: Uuid,
-    watermark: Vec<PipelineOffsets>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ResumeRequest {
-    token: Uuid,
-}
-
-impl PauseRequest {
-    fn matches(&self, pipeline: &Pipeline) -> bool {
-        match self {
-            Self::Topic(topic) => pipeline.topic == *topic,
-            Self::Connector(connector) => pipeline.connector == *connector,
-            Self::Table(table) => pipeline.table == *table,
-        }
-    }
-}
 
 pub(super) async fn pause(
     State(state): State<AppState>,

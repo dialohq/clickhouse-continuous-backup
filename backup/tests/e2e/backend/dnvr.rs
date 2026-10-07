@@ -39,7 +39,7 @@ impl ProcessState {
         !self.running
             && (matches!(
                 self.name.as_str(),
-                "clickhouse" | "redpanda" | "connect" | "minio"
+                "clickhouse" | "redpanda" | "connect" | "minio" | "pause-server"
             ) || self.exit_code != Some(0))
     }
 }
@@ -275,6 +275,13 @@ impl EnvironmentBackend for DnvrBackend {
                 "schema.CLICKHOUSE_DATABASE_ENGINE={}",
                 self.database_engine.as_str()
             ))
+            // Reuse the binary this test run built; a nested `cargo build` would wait on the
+            // build directory lock `cargo test` holds.
+            .arg("--env")
+            .arg(format!(
+                "pause-server.PAUSE_SERVER_BINARY={}",
+                env!("CARGO_BIN_EXE_durable-clickhouse-backup")
+            ))
             .current_dir(&self.project_root)
             .env("DNVR_STATE", self.instance.path())
             .stdin(Stdio::null())
@@ -392,6 +399,13 @@ impl DnvrBackend {
             .await?
             .parse()?;
         let clickhouse_http_url = self.state("clickhouse", "httpUrl", deadline).await?;
+        let pause_server_url = self
+            .timings
+            .measure(
+                "waiting for pause server readiness",
+                self.state("pause-server", "url", deadline),
+            )
+            .await?;
 
         Ok(Endpoints {
             kafka,
@@ -399,6 +413,7 @@ impl DnvrBackend {
             clickhouse_tcp_port,
             clickhouse_http_url,
             connect_url,
+            pause_server_url,
         })
     }
 }
