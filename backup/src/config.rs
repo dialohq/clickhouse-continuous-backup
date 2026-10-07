@@ -144,8 +144,19 @@ pub struct PauseServerConfig {
     pub clickhouse_password: String,
     #[serde(rename = "pauseTimeoutSeconds", deserialize_with = "positive_seconds")]
     pub pause_timeout: Duration,
+    /// How long a token lasts without `/renew` before its connectors are resumed.
+    #[serde(
+        rename = "pauseTtlSeconds",
+        default = "default_pause_ttl",
+        deserialize_with = "positive_seconds"
+    )]
+    pub pause_ttl: Duration,
     pub pipelines: Vec<Pipeline>,
     pub timeouts: RuntimeTimeouts,
+}
+
+fn default_pause_ttl() -> Duration {
+    Duration::from_secs(60)
 }
 
 fn positive_seconds<'de, D: Deserializer<'de>>(

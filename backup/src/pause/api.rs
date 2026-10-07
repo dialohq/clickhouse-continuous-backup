@@ -27,6 +27,8 @@ impl PauseRequest {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PauseResponse {
     pub(crate) token: Uuid,
+    /// The token is resumed this long after `/pause` or the last `/renew`.
+    pub(crate) ttl_seconds: u64,
     pub(crate) watermark: Vec<PipelineOffsets>,
 }
 
@@ -42,5 +44,11 @@ pub(crate) struct PipelineOffsets {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResumeRequest {
+    pub(crate) token: Uuid,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RenewRequest {
     pub(crate) token: Uuid,
 }
