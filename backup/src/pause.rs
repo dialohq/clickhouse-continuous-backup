@@ -1,5 +1,9 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    ffi::OsString,
+    fs::{self, File, OpenOptions, TryLockError},
+    io::ErrorKind,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -32,6 +36,7 @@ struct AppState {
     pause_timeout: Duration,
     /// Held for the whole of each `/pause` and `/resume` request, so they run one at a time.
     pauses: Arc<Mutex<Pauses>>,
+    pauses_file: Arc<Path>,
 }
 
 /// Pauses handed out by `/pause`, kept in memory until `/resume` releases them.
@@ -45,6 +50,42 @@ struct Pauses {
 }
 
 impl Pauses {
+    /// Reads the tokens written by `save`; a missing file means there are none.
+    fn load(path: &Path) -> Result<Self> {
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read pauses from {}", path.display()));
+            }
+        };
+        let tokens: HashMap<Uuid, Vec<String>> = serde_json::from_str(&contents)
+            .with_context(|| format!("invalid pauses in {}", path.display()))?;
+        let mut pauses = Self::default();
+        for (token, connectors) in tokens {
+            pauses.hold(token, connectors);
+        }
+        Ok(pauses)
+    }
+
+    /// Replaces the file atomically, so a crash leaves either the previous or the new tokens.
+    fn save(&self, path: &Path) -> Result<()> {
+        let temporary = with_suffix(path, ".tmp");
+        let write = || -> std::io::Result<()> {
+            let mut file = File::create(&temporary)?;
+            serde_json::to_writer(&mut file, &self.tokens)?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)?;
+            // Persist the rename itself.
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty());
+            File::open(directory.unwrap_or(Path::new(".")))?.sync_all()
+        };
+        write().with_context(|| format!("failed to save pauses to {}", path.display()))
+    }
+
     fn is_held(&self, connector: &str) -> bool {
         self.holders.contains_key(connector)
     }
@@ -140,6 +181,9 @@ impl PauseRequest {
 }
 
 pub async fn run(config: &PauseServerConfig) -> Result<()> {
+    // Kept until the server stops; the OS releases it if the process dies.
+    let _lock = lock_pauses_file(&config.pauses_file)?;
+    let pauses = Pauses::load(&config.pauses_file)?;
     let state = AppState {
         connect: Connect::new(config.connect_url.clone(), &config.timeouts)?,
         clickhouse: ClickHouse::new(
@@ -150,7 +194,8 @@ pub async fn run(config: &PauseServerConfig) -> Result<()> {
         )?,
         pipelines: config.pipelines.clone().into(),
         pause_timeout: config.pause_timeout,
-        pauses: Arc::default(),
+        pauses: Arc::new(Mutex::new(pauses)),
+        pauses_file: config.pauses_file.as_path().into(),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -163,6 +208,34 @@ pub async fn run(config: &PauseServerConfig) -> Result<()> {
     axum::serve(listener, app)
         .await
         .context("pause server failed")
+}
+
+/// Locks `<file>.lock` rather than the file itself, which `Pauses::save` replaces on every write.
+fn lock_pauses_file(path: &Path) -> Result<File> {
+    let lock_path = with_suffix(path, ".lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => bail!(
+            "{} is locked: another pause server is using {}",
+            lock_path.display(),
+            path.display()
+        ),
+        Err(TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("failed to lock {}", lock_path.display()))
+        }
+    }
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut path = OsString::from(path);
+    path.push(suffix);
+    path.into()
 }
 
 async fn health() -> StatusCode {
@@ -232,6 +305,10 @@ async fn pause(State(state): State<AppState>, Json(request): Json<PauseRequest>)
             .map(|&connector| connector.to_owned())
             .collect(),
     );
+    if let Err(error) = pauses.save(&state.pauses_file) {
+        pauses.release(&token);
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
+    }
 
     let running = connectors
         .iter()
@@ -259,6 +336,9 @@ async fn pause(State(state): State<AppState>, Json(request): Json<PauseRequest>)
         Ok(watermark) => Json(PauseResponse { token, watermark }).into_response(),
         Err(error) => {
             let released = pauses.release(&token).unwrap_or_default();
+            if let Err(error) = pauses.save(&state.pauses_file) {
+                eprintln!("failed to remove pause {token} after a failed /pause: {error:#}");
+            }
             // Best effort: a failure cancels the other pauses, any of which may already be paused.
             join_all(
                 released
@@ -308,6 +388,11 @@ async fn resume(State(state): State<AppState>, Json(request): Json<ResumeRequest
         return (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response();
     }
     pauses.release(&request.token);
+    if let Err(error) = pauses.save(&state.pauses_file) {
+        // Keep the token in memory as the file still has it, so the resume can be retried.
+        pauses.hold(request.token, connectors);
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
+    }
     StatusCode::OK.into_response()
 }
 
@@ -504,6 +589,34 @@ mod tests {
         assert!(pauses.release(&token).is_some());
         assert_eq!(pauses.release(&token), None);
         assert_eq!(pauses.connectors(&token), None);
+    }
+
+    #[test]
+    fn saved_pauses_load_back_with_holders() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pauses.json");
+        assert!(Pauses::load(&path).unwrap().tokens.is_empty());
+
+        let (first, second) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut pauses = Pauses::default();
+        pauses.hold(first, vec!["a".to_owned(), "b".to_owned()]);
+        pauses.hold(second, vec!["b".to_owned()]);
+        pauses.save(&path).unwrap();
+
+        let loaded = Pauses::load(&path).unwrap();
+        assert_eq!(loaded.tokens, pauses.tokens);
+        assert_eq!(loaded.holders, pauses.holders);
+        assert!(!with_suffix(&path, ".tmp").exists());
+    }
+
+    #[test]
+    fn second_lock_on_the_same_file_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pauses.json");
+        let lock = lock_pauses_file(&path).unwrap();
+        assert!(lock_pauses_file(&path).is_err());
+        drop(lock);
+        assert!(lock_pauses_file(&path).is_ok());
     }
 
     #[test]
