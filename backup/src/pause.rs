@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -14,7 +14,7 @@ use axum::{
 };
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
 
 use crate::{
@@ -30,6 +30,73 @@ struct AppState {
     clickhouse: ClickHouse,
     pipelines: Arc<[Pipeline]>,
     pause_timeout: Duration,
+    /// Held for the whole of each `/pause` and `/resume` request, so they run one at a time.
+    pauses: Arc<Mutex<Pauses>>,
+}
+
+/// Pauses handed out by `/pause`, kept in memory until `/resume` releases them.
+///
+/// A connector can be held by several tokens and is only resumed once the last one releases it.
+/// Connectors paused outside this server are never held, so they are never resumed here.
+#[derive(Default)]
+struct Pauses {
+    tokens: HashMap<Uuid, Vec<String>>,
+    holders: HashMap<String, HashSet<Uuid>>,
+}
+
+impl Pauses {
+    fn is_held(&self, connector: &str) -> bool {
+        self.holders.contains_key(connector)
+    }
+
+    fn connectors(&self, token: &Uuid) -> Option<&[String]> {
+        self.tokens.get(token).map(Vec::as_slice)
+    }
+
+    fn hold(&mut self, token: Uuid, connectors: Vec<String>) {
+        for connector in &connectors {
+            self.holders
+                .entry(connector.clone())
+                .or_default()
+                .insert(token);
+        }
+        self.tokens.insert(token, connectors);
+    }
+
+    /// The token's connectors that no other token holds, i.e. the ones releasing it would resume.
+    fn held_only_by(&self, token: &Uuid) -> Vec<String> {
+        self.connectors(token)
+            .unwrap_or_default()
+            .iter()
+            .filter(|connector| {
+                self.holders
+                    .get(*connector)
+                    .is_none_or(|holders| holders.len() == 1)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Removes the token and returns its connectors that no other token holds any more.
+    fn release(&mut self, token: &Uuid) -> Option<Vec<String>> {
+        let connectors = self.tokens.remove(token)?;
+        let released = connectors
+            .into_iter()
+            .filter(|connector| match self.holders.get_mut(connector) {
+                Some(holders) => {
+                    holders.remove(token);
+                    if holders.is_empty() {
+                        self.holders.remove(connector);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => true,
+            })
+            .collect();
+        Some(released)
+    }
 }
 
 /// Selects pipelines by exactly one key, e.g. `{"topic": "records.input"}`.
@@ -56,6 +123,12 @@ struct PipelineOffsets {
     keeper_rows: Vec<KeeperRow>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeRequest {
+    token: Uuid,
+}
+
 impl PauseRequest {
     fn matches(&self, pipeline: &Pipeline) -> bool {
         match self {
@@ -77,10 +150,12 @@ pub async fn run(config: &PauseServerConfig) -> Result<()> {
         )?,
         pipelines: config.pipelines.clone().into(),
         pause_timeout: config.pause_timeout,
+        pauses: Arc::default(),
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/pause", post(pause))
+        .route("/resume", post(resume))
         .with_state(state);
     let listener = TcpListener::bind(config.listen)
         .await
@@ -95,6 +170,7 @@ async fn health() -> StatusCode {
 }
 
 async fn pause(State(state): State<AppState>, Json(request): Json<PauseRequest>) -> Response {
+    let mut pauses = state.pauses.lock().await;
     let pipelines = state
         .pipelines
         .iter()
@@ -131,7 +207,32 @@ async fn pause(State(state): State<AppState>, Json(request): Json<PauseRequest>)
         )
             .into_response();
     }
-    // Connectors someone else already paused are left alone, including on failure below.
+    // A connector we don't hold must be running: if it's paused or stopped, someone outside this
+    // server did it, and a later resume from here would undo their decision.
+    if let Some((connector, _)) = connectors
+        .iter()
+        .zip(&statuses)
+        .find(|(connector, status)| !status.is_running() && !pauses.is_held(connector))
+    {
+        return (
+            StatusCode::CONFLICT,
+            format!("connector is not running and was not paused by this server: {connector}"),
+        )
+            .into_response();
+    }
+
+    // Register the pause before touching Connect, so every connector it pauses is accounted for.
+    // It holds all of them, including ones another token already holds, so releasing that token
+    // can't resume them under this one.
+    let token = Uuid::new_v4();
+    pauses.hold(
+        token,
+        connectors
+            .iter()
+            .map(|&connector| connector.to_owned())
+            .collect(),
+    );
+
     let running = connectors
         .iter()
         .zip(&statuses)
@@ -155,15 +256,12 @@ async fn pause(State(state): State<AppState>, Json(request): Json<PauseRequest>)
     }
     .await;
     match result {
-        Ok(watermark) => Json(PauseResponse {
-            token: Uuid::new_v4(),
-            watermark,
-        })
-        .into_response(),
+        Ok(watermark) => Json(PauseResponse { token, watermark }).into_response(),
         Err(error) => {
+            let released = pauses.release(&token).unwrap_or_default();
             // Best effort: a failure cancels the other pauses, any of which may already be paused.
             join_all(
-                running
+                released
                     .iter()
                     .map(|connector| state.connect.resume(connector)),
             )
@@ -171,6 +269,58 @@ async fn pause(State(state): State<AppState>, Json(request): Json<PauseRequest>)
             (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response()
         }
     }
+}
+
+async fn resume(State(state): State<AppState>, Json(request): Json<ResumeRequest>) -> Response {
+    let mut pauses = state.pauses.lock().await;
+    let Some(connectors) = pauses.connectors(&request.token).map(<[String]>::to_vec) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let statuses = match try_join_all(
+        connectors
+            .iter()
+            .map(|connector| state.connect.status(connector)),
+    )
+    .await
+    {
+        Ok(statuses) => statuses,
+        Err(error) => return (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response(),
+    };
+    if let Some((connector, _)) = connectors
+        .iter()
+        .zip(&statuses)
+        .find(|(_, status)| status.is_failed())
+    {
+        return (
+            StatusCode::CONFLICT,
+            format!("connector has failed: {connector}"),
+        )
+            .into_response();
+    }
+
+    // The token is only removed once its connectors are running again, so a failed resume can be
+    // retried with the same token.
+    let released = pauses.held_only_by(&request.token);
+    let resumes = released
+        .iter()
+        .map(|connector| resume_connector(&state, connector));
+    if let Err(error) = try_join_all(resumes).await {
+        return (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response();
+    }
+    pauses.release(&request.token);
+    StatusCode::OK.into_response()
+}
+
+async fn resume_connector(state: &AppState, connector: &str) -> Result<()> {
+    state
+        .connect
+        .resume(connector)
+        .await
+        .with_context(|| format!("failed to resume {connector}"))?;
+    state
+        .connect
+        .wait_running(connector, state.pause_timeout)
+        .await
 }
 
 async fn pause_connector(state: &AppState, connector: &str) -> Result<()> {
@@ -327,6 +477,33 @@ mod tests {
             max_offset: max,
             state: state.to_owned(),
         }
+    }
+
+    #[test]
+    fn connector_is_released_only_by_its_last_holder() {
+        let (first, second) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut pauses = Pauses::default();
+        pauses.hold(first, vec!["a".to_owned(), "b".to_owned()]);
+        pauses.hold(second, vec!["b".to_owned()]);
+
+        assert_eq!(pauses.held_only_by(&first), vec!["a".to_owned()]);
+        assert_eq!(pauses.release(&first), Some(vec!["a".to_owned()]));
+        assert_eq!(pauses.held_only_by(&second), vec!["b".to_owned()]);
+        assert!(!pauses.is_held("a"));
+        assert!(pauses.is_held("b"));
+        assert_eq!(pauses.release(&second), Some(vec!["b".to_owned()]));
+        assert!(!pauses.is_held("b"));
+    }
+
+    #[test]
+    fn unknown_or_released_token_is_not_found() {
+        let token = Uuid::from_u128(1);
+        let mut pauses = Pauses::default();
+        assert_eq!(pauses.release(&token), None);
+        pauses.hold(token, vec!["a".to_owned()]);
+        assert!(pauses.release(&token).is_some());
+        assert_eq!(pauses.release(&token), None);
+        assert_eq!(pauses.connectors(&token), None);
     }
 
     #[test]
