@@ -121,6 +121,37 @@ recovery:
     limits:
       memory: 512Mi
 
+# Pauses and resumes connectors for the backup (and other callers) and hands out exact offsets.
+# Required when backup.enabled is true.
+pauseServer:
+  enabled: true
+  podAnnotations: {}
+  serviceAccountName: ""
+  port: 8080
+  # A pause not renewed within this many seconds is resumed; clients renew every ttlSeconds/3.
+  ttlSeconds: 30
+  # How long the server waits for connectors to pause or resume. The backup's client gives up
+  # after backup.pauseTimeoutSeconds + timeouts.connectRequestSeconds, so keep
+  # backup.pauseTimeoutSeconds at least this large.
+  pauseTimeoutSeconds: 120
+  logLevel: "off,durable_clickhouse_backup=info"
+  # Reads the connectors' KeeperMap state tables; SELECT on them is enough.
+  # Same properties format as clickhouse.credentialsFile; alternative to credentialsSecret.name.
+  credentialsFile: ""
+  credentialsSecret:
+    name: ""
+    propertiesKey: clickhouse.properties
+  # Holds the tokens file, so pauses survive pod restarts and still expire.
+  persistence:
+    storageClass: ""
+    size: 64Mi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
 pipelines: []
 # - name: records
 #   topic: records.input

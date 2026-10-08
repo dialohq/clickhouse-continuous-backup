@@ -82,6 +82,11 @@ destination tables and `system.tables`, and `CREATE TABLE`, `SELECT`, and
 `INSERT` for isolated KeeperMap tables. It should be distinct from both the
 ingestion writer and backup identity.
 
+The pause server uses a separate `pauseServer.credentialsSecret` containing
+`clickhouse.properties`, in the same format as the writer Secret. It only reads
+the connectors' KeeperMap state tables, so `SELECT` on them is enough. It
+should be distinct from the ingestion writer.
+
 RGW/S3 credentials are not passed through Helm. Configure
 `backup.namedCollection` on every ClickHouse server. The
 collection may use fixed access keys for a test such as MinIO, environment or
@@ -90,14 +95,15 @@ ClickHouse deployment.
 
 ## Vault Agent injection
 
-Set `clickhouse.credentialsFile`, `backup.credentialsFile`, and
-`recovery.credentialsFile` to the injected paths. Files contain `username=...`
-and `password=...`, one per line. Set exactly one of `credentialsFile` or
-`credentialsSecret.name` for each component (backup only when enabled).
+Set `clickhouse.credentialsFile`, `backup.credentialsFile`,
+`recovery.credentialsFile`, and `pauseServer.credentialsFile` to the injected
+paths. Files contain `username=...` and `password=...`, one per line. Set
+exactly one of `credentialsFile` or `credentialsSecret.name` for each component
+(backup and pause server only when enabled).
 Use single-line values without backslashes or leading/trailing whitespace.
 
 Configure `podAnnotations` and `serviceAccountName` under `connect`,
-`registration`, `backup`, and `recovery`. The accounts and Vault roles must exist.
+`registration`, `backup`, `recovery`, and `pauseServer`. The accounts and Vault roles must exist.
 Vault supplies the volumes and containers; template annotations pass through
 literally. Registration uses `clickhouse.credentialsFile` and needs Vault's
 `agent-init-first: "true"`. Use `agent-pre-populate-only: "true"` for registration

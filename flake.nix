@@ -73,6 +73,7 @@
             --set backup.enabled=true
             --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
             --set-string recovery.credentialsSecret.name=clickhouse-recovery-credentials
+            --set-string pauseServer.credentialsSecret.name=clickhouse-pause-credentials
             --set backup.maxIncrementalsPerFull=2
             --set backup.maxBandwidthBytesPerSecond=1048576
           )
@@ -82,6 +83,12 @@
             --set-string kafka.existingSecret=kafka-credentials > /dev/null
           helm template test ${chartSource} "''${chart_args[@]}" \
             --set backup.enabled=false > rendered-without-backups.yaml
+          helm template test ${chartSource} "''${chart_args[@]}" \
+            --set backup.enabled=false --set pauseServer.enabled=false \
+            > rendered-without-pause-server.yaml
+          # The grace period must outlast one /resume call: pauseTimeoutSeconds + connectRequestSeconds.
+          helm template test ${chartSource} "''${chart_args[@]}" \
+            --set backup.pauseTimeoutSeconds=10 --set backup.terminationGracePeriodSeconds=26 > /dev/null
           helm template test ${chartSource} "''${chart_args[@]}" \
             --set-string 'pipelines[1].name=other' \
             --set-string 'pipelines[1].topic=other.input' \
@@ -99,11 +106,18 @@
           expect_rejected --set backup.pauseTimeoutSeconds=0
           expect_rejected --set backup.activeDeadlineSeconds=0
           expect_rejected --set backup.terminationGracePeriodSeconds=15
+          expect_rejected --set backup.pauseTimeoutSeconds=10 --set backup.terminationGracePeriodSeconds=25
+          expect_rejected --set pauseServer.enabled=false
+          expect_rejected --set pauseServer.ttlSeconds=0
+          expect_rejected --set pauseServer.pauseTimeoutSeconds=0
+          expect_rejected --set pauseServer.port=0
+          expect_rejected --set pauseServer.port=65536
+          expect_rejected --set-string pauseServer.persistence.size=
           expect_rejected --set timeouts.kafkaTransactionSeconds=0
           expect_rejected --set recovery.replayTopicReplicationFactor=0
           expect_rejected --set recovery.replayTopicRetentionMs=0
           expect_rejected --set recovery.replayBatchRecords=0
-          for component in clickhouse backup recovery; do
+          for component in clickhouse backup recovery pauseServer; do
             expect_rejected --set-string "$component.credentialsSecret.name="
             expect_rejected --set-string "$component.credentialsFile=/vault/secrets/clickhouse.properties"
             expect_rejected --set-string "$component.credentialsSecret.name=" \
@@ -145,13 +159,29 @@
           grep -F 'secretName: clickhouse-recovery-credentials' rendered.yaml >/dev/null
           grep -F 'backupID:' ${chartSource}/crds/table-recovery.yaml >/dev/null
           grep -F 'rule: self == oldSelf' ${chartSource}/crds/table-recovery.yaml >/dev/null
+          grep -F 'pause-server.json: |' rendered.yaml >/dev/null
+          grep -F '"pauseServerUrl": "http://test-durable-clickhouse-sink-pause-server:8080"' rendered.yaml >/dev/null
+          grep -F '"listen": "0.0.0.0:8080"' rendered.yaml >/dev/null
+          grep -F '"pausesFile": "/var/lib/pause-server/pauses.json"' rendered.yaml >/dev/null
+          grep -F '"clickhousePropertiesFile": "/etc/clickhouse-pause/clickhouse.properties"' rendered.yaml >/dev/null
+          grep -F '"pauseTtlSeconds": 30' rendered.yaml >/dev/null
+          grep -F 'kind: PersistentVolumeClaim' rendered.yaml >/dev/null
+          grep -F 'claimName: test-durable-clickhouse-sink-pause-server' rendered.yaml >/dev/null
+          grep -F 'component: pause-server' rendered.yaml >/dev/null
+          grep -F '"pause-server", "/etc/durable-clickhouse/pause-server.json"' rendered.yaml >/dev/null
+          grep -F 'secretName: clickhouse-pause-credentials' rendered.yaml >/dev/null
+          grep -F 'value: "off,durable_clickhouse_backup=info"' rendered.yaml >/dev/null
+          if grep -F 'name: test-durable-clickhouse-sink-pause-server' rendered-without-pause-server.yaml; then
+            echo "pause server rendered although pauseServer.enabled is false" >&2
+            exit 1
+          fi
           ${packages.backup}/bin/durable-clickhouse-backup print-recovery-crd > generated-recovery-crd.yaml
           diff -u ${chartSource}/crds/table-recovery.yaml generated-recovery-crd.yaml
           touch $out
         '';
     });
 
-    devShells = nixpkgs.lib.genAttrs ["x86_64-linux"] (system: let
+    devShells = nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-darwin"] (system: let
       pkgs = import nixpkgs {
         inherit system;
         config = {

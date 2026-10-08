@@ -1,0 +1,111 @@
+{{- if .Values.pauseServer.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.pauseServer.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.pauseServer.persistence.size | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: pause-server
+  ports:
+    - name: http
+      port: {{ .Values.pauseServer.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+spec:
+  # One process owns the tokens file and its lock; Recreate frees the volume before the next pod.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: pause-server
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
+        app.kubernetes.io/component: pause-server
+      {{- with .Values.pauseServer.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.pauseServer.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: pause-server
+          image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+          imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+          command: ["/bin/durable-clickhouse-backup", "pause-server", "/etc/durable-clickhouse/pause-server.json"]
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.pauseServer.logLevel | quote }}
+          ports:
+            - {name: http, containerPort: {{ .Values.pauseServer.port }}}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.pauseServer.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
+            - {name: data, mountPath: /var/lib/pause-server}
+            {{- if .Values.pauseServer.credentialsSecret.name }}
+            - {name: clickhouse-pause-credentials, mountPath: /etc/clickhouse-pause, readOnly: true}
+            {{- end }}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+        - name: runtime-config
+          configMap:
+            name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+        {{- if .Values.pauseServer.credentialsSecret.name }}
+        - name: clickhouse-pause-credentials
+          secret:
+            secretName: {{ .Values.pauseServer.credentialsSecret.name }}
+            items:
+              - key: {{ .Values.pauseServer.credentialsSecret.propertiesKey }}
+                path: clickhouse.properties
+        {{- end }}
+{{- end }}

@@ -15,6 +15,7 @@
       fi
 
       connect_url=$(dnvr-state get connect.url)
+      pause_server_url=$(dnvr-state get pause-server.url)
       clickhouse_url=$(dnvr-state get clickhouse.httpUrl)
       kafka=$(dnvr-state get redpanda.bootstrapServers)
       partitions=$(rpk --ignore-profile -X brokers="$kafka" \
@@ -24,11 +25,13 @@
 
       jq -n \
         --arg connect_url "$connect_url" \
+        --arg pause_server_url "$pause_server_url" \
         --arg clickhouse_url "$clickhouse_url" \
         --arg kafka "$kafka" \
         --argjson partitions "$partitions" \
         '{
           connectUrl: $connect_url,
+          pauseServerUrl: $pause_server_url,
           clickhouseUrl: $clickhouse_url,
           namedCollection: "durable_backups",
           pathPrefix: "durable-e2e",
@@ -88,6 +91,33 @@
       runHook postInstall
     '';
   };
+  # Redpanda has no macOS build, so on Darwin it runs as a Docker container on
+  # the host network, binding the same 127.0.0.1 ports as the native binary.
+  # Its data lives in a named volume: Redpanda's direct I/O asserts on the
+  # 1MiB alignment reported by macOS bind mounts.
+  inherit (pkgs.stdenv.hostPlatform) isLinux;
+  redpandaImage = "docker.redpanda.com/redpandadata/redpanda:v26.2.2";
+  redpandaFlags = "--smp 1 --memory 1G --reserve-memory 0M --overprovisioned --lock-memory=false --unsafe-bypass-fsync=true";
+  redpandaRuntime =
+    if isLinux
+    then redpanda
+    else pkgs.docker-client;
+  redpandaDataDir =
+    if isLinux
+    then ''"$data"''
+    else "/var/lib/redpanda/data";
+  redpandaExec =
+    if isLinux
+    then ''redpanda --redpanda-cfg "$config" ${redpandaFlags}''
+    else ''
+      docker run --rm --name "$container" \
+        --network host \
+        --volume "$config:/etc/redpanda/redpanda.yaml" \
+        --volume "$container:/var/lib/redpanda/data" \
+        --entrypoint /opt/redpanda/bin/redpanda \
+        ${redpandaImage} \
+        --redpanda-cfg /etc/redpanda/redpanda.yaml ${redpandaFlags}
+    '';
 in {
   dnvr.shells.default = {
     description = "Durable ClickHouse sink development services";
@@ -99,13 +129,15 @@ in {
       pkgs.clickhouse
       pkgs.curl
       pkgs.jq
+      # The same tmux build dnvr's runner uses, so clients match its server.
+      pkgs.tmux
       pkgs.kubeconform
       pkgs.kubectl
       pkgs.kubernetes-helm
       pkgs.minio
       pkgs.minio-client
       pkgs.redpanda-client
-      redpanda
+      redpandaRuntime
       pkgs.cargo
       pkgs.rustc
       pkgs.rust-analyzer
@@ -170,10 +202,10 @@ in {
     };
 
     processes.redpanda = {
-      packages = [redpanda pkgs.curl];
+      packages = [redpandaRuntime pkgs.curl];
       command = pkgs.writeShellApplication {
         name = "durable-sink-redpanda";
-        runtimeInputs = [redpanda pkgs.curl pkgs.minijinja dnvrState];
+        runtimeInputs = [redpandaRuntime pkgs.curl pkgs.minijinja dnvrState];
         text = ''
           set -euo pipefail
           kafka_port=$(dnvr-state pick-port port)
@@ -188,17 +220,19 @@ in {
             --define kafka_port="$kafka_port" \
             --define admin_port="$admin_port" \
             --define rpc_port="$rpc_port" \
-            --define data_dir="$data" \
+            --define data_dir=${redpandaDataDir} \
             ${./redpanda.yaml.j2} --output "$config"
+          ${pkgs.lib.optionalString (!isLinux) ''
+            container="durable-sink-redpanda-$(printf '%s' "$DNVR_STATE" | cksum | cut -d ' ' -f 1)"
+            # A previous run killed without cleanup may have left the container behind.
+            docker rm --force "$container" >/dev/null 2>&1 || true
+            # The container and its data volume share this name; the e2e tests remove both.
+            dnvr-state set container "$container"
+          ''}
 
           ${supervise {
             name = "Redpanda";
-            start = ''
-              redpanda --redpanda-cfg "$config" \
-                --smp 1 --memory 1G --reserve-memory 0M \
-                --overprovisioned --lock-memory=false \
-                --unsafe-bypass-fsync=true
-            '';
+            start = redpandaExec;
             readyWhen = ''curl --fail --silent "http://127.0.0.1:$admin_port/v1/status/ready" >/dev/null'';
             onReady = ''
               curl --fail-with-body --silent --show-error \
@@ -259,6 +293,54 @@ in {
               dnvr-state set tcpPort "$tcp_port"
               dnvr-state set httpUrl "http://127.0.0.1:$http_port"
               echo "ClickHouse ready at http://127.0.0.1:$http_port"
+            '';
+          }}
+        '';
+      };
+    };
+
+    processes.pause-server = {
+      packages = [pkgs.cargo pkgs.curl];
+      env = {
+        CONNECT_URL = "dnvr://connect/url";
+        CLICKHOUSE_URL = "dnvr://clickhouse/httpUrl";
+        # A prebuilt binary to run instead of building one, e.g. from `cargo test`.
+        PAUSE_SERVER_BINARY = "";
+      };
+      command = pkgs.writeShellApplication {
+        name = "durable-sink-pause-server";
+        runtimeInputs = [pkgs.cargo pkgs.rustc pkgs.curl pkgs.minijinja dnvrState];
+        text = ''
+          set -euo pipefail
+          port=$(dnvr-state pick-port port)
+          config="$DNVR_RUNTIME_DIR/pause-server.json"
+          data="$DNVR_STATE/data/pause-server"
+          mkdir -p "$data"
+
+          minijinja-cli --strict --autoescape none \
+            --define listen="127.0.0.1:$port" \
+            --define pauses_file="$data/pauses.json" \
+            --define connect_url="$CONNECT_URL" \
+            --define clickhouse_url="$CLICKHOUSE_URL" \
+            ${./pause-server-config.json.j2} --output "$config"
+
+          # Run the built binary directly: `cargo run` would not pass SIGTERM on to it.
+          binary="$PAUSE_SERVER_BINARY"
+          if [[ -z $binary ]]; then
+            cargo build --manifest-path "$DNVR_ROOT/backup/Cargo.toml"
+            binary="$DNVR_ROOT/backup/target/debug/durable-clickhouse-backup"
+          fi
+          export CLICKHOUSE_USERNAME=default
+
+          ${supervise {
+            name = "Pause server";
+            start = ''"$binary" pause-server "$config"'';
+            readyWhen = ''curl --fail --silent "http://127.0.0.1:$port/health" >/dev/null'';
+            onReady = ''
+              dnvr-state set host 127.0.0.1
+              dnvr-state set port "$port"
+              dnvr-state set url "http://127.0.0.1:$port"
+              echo "Pause server ready at http://127.0.0.1:$port"
             '';
           }}
         '';
@@ -333,6 +415,7 @@ in {
             sleep 0.2
           done
           until [[ $(clickhouse-client \
+            --user default \
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --query "EXISTS durable_e2e.records") == 1 ]]; do
@@ -372,6 +455,7 @@ in {
             *) echo "Unsupported database engine: $CLICKHOUSE_DATABASE_ENGINE" >&2; exit 1 ;;
           esac
           clickhouse-client \
+            --user default \
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --query "CREATE DATABASE IF NOT EXISTS durable_e2e ENGINE = $database_engine"
@@ -380,6 +464,7 @@ in {
             --define database_engine="$CLICKHOUSE_DATABASE_ENGINE" \
             "$SCHEMA_FILE" --output "$schema"
           clickhouse-client \
+            --user default \
             --host "$CLICKHOUSE_HOST" \
             --port "$CLICKHOUSE_TCP_PORT" \
             --multiquery \
@@ -392,6 +477,8 @@ in {
     env = {
       MINIO_ROOT_USER = "durable-e2e";
       MINIO_ROOT_PASSWORD = "durable-e2e-secret";
+      # Only the application's own logs; dependencies such as tower_http stay silent.
+      RUST_LOG = "off,durable_clickhouse_backup=info";
     };
   };
 }
