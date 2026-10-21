@@ -133,8 +133,9 @@ pub struct ControllerConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PauseServerConfig {
     pub listen: SocketAddr,
-    /// Where tokens are persisted; `<file>.lock` next to it guards against a second server.
-    pub pauses_file: PathBuf,
+    pub keeper_address: String,
+    #[serde(default = "default_keeper_path")]
+    pub keeper_path: String,
     pub connect_url: String,
     pub clickhouse_url: String,
     pub clickhouse_properties_file: Option<PathBuf>,
@@ -153,6 +154,10 @@ pub struct PauseServerConfig {
     pub pause_ttl: Duration,
     pub pipelines: Vec<Pipeline>,
     pub timeouts: RuntimeTimeouts,
+}
+
+fn default_keeper_path() -> String {
+    "/durable-clickhouse-sink".to_owned()
 }
 
 fn default_pause_ttl() -> Duration {

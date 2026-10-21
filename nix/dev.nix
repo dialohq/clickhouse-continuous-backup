@@ -292,6 +292,7 @@ in {
               dnvr-state set httpPort "$http_port"
               dnvr-state set tcpPort "$tcp_port"
               dnvr-state set httpUrl "http://127.0.0.1:$http_port"
+              dnvr-state set keeperAddress "127.0.0.1:$keeper_port"
               echo "ClickHouse ready at http://127.0.0.1:$http_port"
             '';
           }}
@@ -304,6 +305,7 @@ in {
       env = {
         CONNECT_URL = "dnvr://connect/url";
         CLICKHOUSE_URL = "dnvr://clickhouse/httpUrl";
+        KEEPER_ADDRESS = "dnvr://clickhouse/keeperAddress";
         # A prebuilt binary to run instead of building one, e.g. from `cargo test`.
         PAUSE_SERVER_BINARY = "";
       };
@@ -314,12 +316,10 @@ in {
           set -euo pipefail
           port=$(dnvr-state pick-port port)
           config="$DNVR_RUNTIME_DIR/pause-server.json"
-          data="$DNVR_STATE/data/pause-server"
-          mkdir -p "$data"
 
           minijinja-cli --strict --autoescape none \
             --define listen="127.0.0.1:$port" \
-            --define pauses_file="$data/pauses.json" \
+            --define keeper_address="$KEEPER_ADDRESS" \
             --define connect_url="$CONNECT_URL" \
             --define clickhouse_url="$CLICKHOUSE_URL" \
             ${./pause-server-config.json.j2} --output "$config"
