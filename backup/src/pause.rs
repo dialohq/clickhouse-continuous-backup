@@ -7,9 +7,9 @@ mod registry;
 pub(crate) use api::{PauseRequest, PipelineOffsets};
 pub(crate) use client::PauseClient;
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     Router,
     http::StatusCode,
@@ -20,7 +20,7 @@ use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, error, info};
 
 use crate::{clickhouse::ClickHouse, config::PauseServerConfig, connect::Connect, model::Pipeline};
-use registry::{Pauses, lock_pauses_file};
+use registry::TokenStore;
 
 #[derive(Clone)]
 struct AppState {
@@ -29,23 +29,17 @@ struct AppState {
     pipelines: Arc<[Pipeline]>,
     pause_timeout: Duration,
     ttl: Duration,
-    /// Held for the whole of each `/pause` and `/resume` request, so they run one at a time.
-    pauses: Arc<Mutex<Pauses>>,
-    pauses_file: Arc<Path>,
+    /// Held for the whole of each request and sweep, so they run one at a time.
+    store: Arc<Mutex<TokenStore>>,
 }
 
 pub async fn run(config: &PauseServerConfig) -> Result<()> {
-    // Kept until the server stops; the OS releases it if the process dies.
-    let _lock = lock_pauses_file(&config.pauses_file)
+    let store = TokenStore::connect(&config.keeper_address, &config.keeper_path).await?;
+    store
+        .lock()
+        .await
         .inspect_err(|error| error!("cannot start the pause server: {error:#}"))?;
-    info!(file = %config.pauses_file.display(), "locked the pauses file");
-    let pauses = Pauses::load(&config.pauses_file)?;
-    info!(
-        tokens = pauses.tokens().len(),
-        ttl_seconds = config.pause_ttl.as_secs(),
-        pipelines = config.pipelines.len(),
-        "loaded pauses"
-    );
+    info!(address = %config.keeper_address, lock = %store.lock_path(), "acquired the Keeper lock");
     let state = AppState {
         connect: Connect::new(config.connect_url.clone(), &config.timeouts)?,
         clickhouse: ClickHouse::new(
@@ -57,17 +51,17 @@ pub async fn run(config: &PauseServerConfig) -> Result<()> {
         pipelines: config.pipelines.clone().into(),
         pause_timeout: config.pause_timeout,
         ttl: config.pause_ttl,
-        pauses: Arc::new(Mutex::new(pauses)),
-        pauses_file: config.pauses_file.as_path().into(),
+        store: Arc::new(Mutex::new(store.clone())),
     };
-    // Tokens loaded from the file expire like any other, including ones already past due.
-    {
-        let mut pauses = state.pauses.lock().await;
-        for token in pauses.tokens() {
-            let expiry_task = tokio::spawn(handlers::expire_when_due(state.clone(), token));
-            pauses.track_expiry(token, expiry_task.abort_handle());
-        }
-    }
+    // Clean up what expired while no server was running before taking requests.
+    let tokens = handlers::sweep(&state, &store).await?;
+    info!(
+        tokens,
+        ttl_seconds = config.pause_ttl.as_secs(),
+        pipelines = config.pipelines.len(),
+        "loaded pauses"
+    );
+    tokio::spawn(handlers::sweep_periodically(state.clone()));
     let app = Router::new()
         .route("/health", get(health))
         .route("/pause", post(handlers::pause))
@@ -83,9 +77,14 @@ pub async fn run(config: &PauseServerConfig) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind pause server to {}", config.listen))?;
     info!(listen = %config.listen, "pause server listening");
-    axum::serve(listener, app)
-        .await
-        .context("pause server failed")
+    // Without the session the lock is gone and another server may take over, so this one stops.
+    tokio::select! {
+        result = axum::serve(listener, app) => result.context("pause server failed"),
+        state = store.session_ended() => {
+            error!(%state, "lost the Keeper session and with it the lock");
+            bail!("lost the Keeper session ({state}), so another pause server may hold the lock")
+        }
+    }
 }
 
 async fn health() -> StatusCode {
