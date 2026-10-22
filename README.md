@@ -54,6 +54,15 @@ clickhouse:
   credentialsSecret:
     name: durable-clickhouse-writer
 
+recovery:
+  credentialsSecret:
+    name: durable-clickhouse-recovery
+
+pauseServer:
+  keeperAddress: clickhouse-keeper.example.internal:9181
+  credentialsSecret:
+    name: durable-clickhouse-pause-server
+
 pipelines:
   - name: records
     topic: durable.records
@@ -103,6 +112,23 @@ backup:
     passwordKey: password
 ```
 
+Backups pause ingestion through the [pause server](docs/pause-server.md),
+deployed by default. Its replicas elect a leader and keep their tokens in
+ClickHouse Keeper, and the leader labels its pod so the Service routes to it.
+It needs its own ClickHouse credentials with `SELECT` on the KeeperMap state
+tables, and the address of a Keeper it can write to:
+
+```yaml
+pauseServer:
+  enabled: true
+  replicas: 2
+  keeperAddress: clickhouse-keeper.example.internal:9181
+  ttlSeconds: 30
+  credentialsSecret:
+    name: durable-clickhouse-pause-server
+    propertiesKey: clickhouse.properties
+```
+
 Network, Kafka, polling, hook, and backup deadlines have chart defaults under
 `timeouts` and `backup`. Override them for the deployment's latency and backup
 size; the backup binary does not carry fallback durations of its own.
@@ -127,6 +153,7 @@ them as a routine Helm change.
 - [Authentication and credential rotation](docs/authentication.md)
 - [Declarative table recovery and point-in-time replay](docs/table-recovery.md)
 - [Backup procedure](docs/backup-procedure.md)
+- [Pause server](docs/pause-server.md)
 - [Test plan](docs/testing.md)
 - [External design references](docs/references.md)
 

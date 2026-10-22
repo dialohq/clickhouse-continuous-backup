@@ -1,0 +1,132 @@
+{{- if .Values.pauseServer.enabled }}
+{{- if not .Values.pauseServer.serviceAccountName }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+subjects:
+  - kind: ServiceAccount
+    name: {{ default (printf "%s-pause-server" (include "durable-clickhouse-sink.fullname" .)) .Values.pauseServer.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: pause-server
+    durable-clickhouse.dialo.ai/pause-server-role: active
+  ports:
+    - name: http
+      port: {{ .Values.pauseServer.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "durable-clickhouse-sink.fullname" . }}-pause-server
+  labels:
+    {{- include "durable-clickhouse-sink.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pause-server
+spec:
+  replicas: {{ .Values.pauseServer.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "durable-clickhouse-sink.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: pause-server
+  template:
+    metadata:
+      labels:
+        {{- include "durable-clickhouse-sink.labels" . | nindent 8 }}
+        app.kubernetes.io/component: pause-server
+      {{- with .Values.pauseServer.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ default (printf "%s-pause-server" (include "durable-clickhouse-sink.fullname" .)) .Values.pauseServer.serviceAccountName }}
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: pause-server
+          image: "{{ .Values.connect.image.repository }}:{{ .Values.connect.image.tag }}"
+          imagePullPolicy: {{ .Values.connect.image.pullPolicy }}
+          command: ["/bin/durable-clickhouse-backup", "pause-server", "/etc/durable-clickhouse/pause-server.json"]
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.pauseServer.logLevel | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          ports:
+            - {name: http, containerPort: {{ .Values.pauseServer.port }}}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.pauseServer.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: runtime-config, mountPath: /etc/durable-clickhouse, readOnly: true}
+            {{- if .Values.pauseServer.credentialsSecret.name }}
+            - {name: clickhouse-pause-credentials, mountPath: /etc/clickhouse-pause, readOnly: true}
+            {{- end }}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+        - name: runtime-config
+          configMap:
+            name: {{ include "durable-clickhouse-sink.fullname" . }}-runtime
+        {{- if .Values.pauseServer.credentialsSecret.name }}
+        - name: clickhouse-pause-credentials
+          secret:
+            secretName: {{ .Values.pauseServer.credentialsSecret.name }}
+            items:
+              - key: {{ .Values.pauseServer.credentialsSecret.propertiesKey }}
+                path: clickhouse.properties
+        {{- end }}
+{{- end }}

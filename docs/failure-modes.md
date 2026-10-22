@@ -34,9 +34,12 @@ the final watermark check and manifest commit. Prevent that by provisioning and
 monitoring retention headroom; do not retain a backup checkpoint whose offsets
 are no longer present if exact input position matters to downstream tooling.
 
-No process can clean up after `SIGKILL`, node loss, or losing network access to
-Connect. A connector can remain paused; alert on failed Jobs and non-running
-connectors.
+After `SIGKILL` or node loss of a backup Job, the pause server resumes the
+connectors once the Job's token expires. Losing the pause server's leader does
+not change that: a standby takes over with the tokens in Keeper, after at most
+Keeper's session timeout. Nothing can resume the connectors while Connect or
+Keeper is unreachable, or if the tokens are deleted from Keeper; a connector
+can then remain paused. Alert on failed Jobs and non-running connectors.
 
 ## Operational limits
 

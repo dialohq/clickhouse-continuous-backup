@@ -23,6 +23,7 @@ impl<B: EnvironmentBackend> TestEnvironment<B> {
         let connect = ConnectClient::new(endpoints.connect_url.clone());
         let backup = BackupClient::new(
             endpoints.connect_url.clone(),
+            endpoints.pause_server_url.clone(),
             endpoints.clickhouse_http_url.clone(),
             endpoints.kafka.clone(),
         );
