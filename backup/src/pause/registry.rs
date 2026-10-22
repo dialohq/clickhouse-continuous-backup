@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 use uuid::Uuid;
-use zookeeper_client::{Acls, Client, CreateMode, Error as KeeperError, SessionState};
+use zookeeper_client::{
+    Acls, Client, CreateMode, CreateOptions, Error as KeeperError, OwnedLockClient,
+};
 
 /// One token's pause: the connectors it holds and when it lapses unless renewed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,81 +68,43 @@ impl Snapshot {
     }
 }
 
-/// The pause server's nodes in Keeper, under its configured path:
+/// The tokens in Keeper, as one leader reads and writes them:
 ///
 /// ```text
 /// <path>/tokens/<token>   one per token, the JSON of its `Pause`
-/// <path>/leader           the lock: ephemeral, so it goes with the session of the server holding it
+/// <path>/leader/...       the contenders for leadership, see `leader`
 /// ```
+///
+/// Writes that change a token go through the leader's lock, so they fail once it's lost. Only
+/// creating one can't: Keeper rejects the create a guarded write needs. A former leader creating a
+/// token is harmless though, the new leader's sweep expires it.
 #[derive(Clone)]
 pub(super) struct TokenStore {
-    client: Client,
+    /// Shared, never cloned: dropping any copy of it deletes the lock node.
+    lock: Arc<OwnedLockClient>,
     path: String,
 }
 
 impl TokenStore {
-    pub(super) async fn connect(address: &str, path: &str) -> Result<Self> {
-        // ClickHouse Keeper rejects `Create2`, which the client sends unless the server is 3.4.
-        let client = Client::connector()
-            .with_server_version(3, 4, 0)
-            .connect(address)
-            .await
-            .with_context(|| format!("failed to connect to Keeper at {address}"))?;
+    pub(super) async fn new(lock: Arc<OwnedLockClient>, path: &str) -> Result<Self> {
         let store = Self {
-            client,
+            lock,
             path: path.to_owned(),
         };
+        let tokens_path = store.tokens_path();
         store
-            .client
-            .mkdir(
-                &store.tokens_path(),
-                &CreateMode::Persistent.with_acls(Acls::anyone_all()),
-            )
+            .client()
+            .mkdir(&tokens_path, &persistent())
             .await
-            .with_context(|| format!("failed to create {} in Keeper", store.tokens_path()))?;
+            .with_context(|| format!("failed to create {tokens_path} in Keeper"))?;
         Ok(store)
-    }
-
-    /// Creates the lock node, failing if another server already holds it.
-    ///
-    /// Keeper removes it when this server's session ends, whether it stops or dies, so the next
-    /// server can start once the session has timed out.
-    pub(super) async fn lock(&self) -> Result<()> {
-        let path = self.lock_path();
-        match self
-            .client
-            .create(
-                &path,
-                &[],
-                &CreateMode::Ephemeral.with_acls(Acls::anyone_all()),
-            )
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(KeeperError::NodeExists) => {
-                bail!("{path} exists in Keeper: another pause server holds the lock")
-            }
-            Err(error) => Err(error).with_context(|| format!("failed to create {path} in Keeper")),
-        }
-    }
-
-    /// Resolves once the Keeper session is gone for good, and with it the lock.
-    pub(super) async fn session_ended(&self) -> SessionState {
-        let mut watcher = self.client.state_watcher();
-        loop {
-            let state = watcher.state();
-            if state.is_terminated() {
-                return state;
-            }
-            watcher.changed().await;
-        }
     }
 
     /// Reads every token written by `save`.
     pub(super) async fn read(&self) -> Result<Snapshot> {
         let tokens_path = self.tokens_path();
         let names = self
-            .client
+            .client()
             .list_children(&tokens_path)
             .await
             .with_context(|| format!("failed to list {tokens_path} in Keeper"))?;
@@ -151,7 +115,7 @@ impl TokenStore {
                 .parse()
                 .with_context(|| format!("{path} in Keeper is not a token"))?;
             let (data, _) = self
-                .client
+                .client()
                 .get_data(&path)
                 .await
                 .with_context(|| format!("failed to read {path} from Keeper"))?;
@@ -166,14 +130,10 @@ impl TokenStore {
     pub(super) async fn save(&self, token: &Uuid, pause: &Pause) -> Result<()> {
         let path = self.token_path(token);
         let data = serde_json::to_vec(pause)?;
-        let result = match self.client.set_data(&path, &data, None).await {
+        let result = match self.lock.set_data(&path, &data, None).await {
             Err(KeeperError::NoNode) => self
-                .client
-                .create(
-                    &path,
-                    &data,
-                    &CreateMode::Persistent.with_acls(Acls::anyone_all()),
-                )
+                .client()
+                .create(&path, &data, &persistent())
                 .await
                 .map(|_| ()),
             result => result.map(|_| ()),
@@ -186,7 +146,7 @@ impl TokenStore {
     /// Deletes the token's node; a node that is already gone is fine.
     pub(super) async fn remove(&self, token: &Uuid) -> Result<()> {
         let path = self.token_path(token);
-        match self.client.delete(&path, None).await {
+        match self.lock.delete(&path, None).await {
             Ok(()) | Err(KeeperError::NoNode) => {
                 debug!(%token, "removed pause");
                 Ok(())
@@ -197,8 +157,8 @@ impl TokenStore {
         }
     }
 
-    pub(super) fn lock_path(&self) -> String {
-        format!("{}/leader", self.path)
+    fn client(&self) -> &Client {
+        self.lock.client()
     }
 
     fn tokens_path(&self) -> String {
@@ -208,6 +168,10 @@ impl TokenStore {
     fn token_path(&self, token: &Uuid) -> String {
         format!("{}/{token}", self.tokens_path())
     }
+}
+
+pub(super) fn persistent() -> CreateOptions<'static> {
+    CreateMode::Persistent.with_acls(Acls::anyone_all())
 }
 
 #[cfg(test)]

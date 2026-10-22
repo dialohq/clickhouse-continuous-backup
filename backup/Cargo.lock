@@ -702,6 +702,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower-http",
  "tracing",
  "tracing-subscriber",
