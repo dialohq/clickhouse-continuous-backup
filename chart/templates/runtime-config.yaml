@@ -35,7 +35,8 @@ data:
   pause-server.json: |
     {
       "listen": "0.0.0.0:{{ .Values.pauseServer.port }}",
-      "pausesFile": "/var/lib/pause-server/pauses.json",
+      "keeperAddress": {{ .Values.pauseServer.keeperAddress | quote }},
+      "keeperPath": {{ printf "/durable-clickhouse-sink/pause-server/%s" .Values.stateNamespace | quote }},
       "connectUrl": "http://{{ include "durable-clickhouse-sink.fullname" . }}-connect:8083",
       "clickhouseUrl": {{ printf "%s://%s:%v/" (ternary "https" "http" .Values.clickhouse.secure) .Values.clickhouse.host .Values.clickhouse.port | quote }},
       "clickhousePropertiesFile": {{ default "/etc/clickhouse-pause/clickhouse.properties" .Values.pauseServer.credentialsFile | quote }},

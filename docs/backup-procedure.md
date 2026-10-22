@@ -110,8 +110,9 @@ server, which then resumes the connectors itself.
   the recorded offsets were still replayable immediately before commit.
 - `SIGKILL` or node loss stops the Job from resuming its token; the pause server
   resumes the connectors once the token expires (`pauseServer.ttlSeconds`).
-  Loss of the Connect API or of the pause server's volume can still leave
-  connectors paused; operators must alert on failed Jobs and paused connectors.
+  Loss of the Connect API, of Keeper, or of the pause server's tokens in Keeper
+  can still leave connectors paused; operators must alert on failed Jobs and
+  paused connectors.
 - Loss or unauthorized modification of the backup catalog destroys the
   authoritative KeeperMap checkpoint. Protect and retain that compacted topic.
 

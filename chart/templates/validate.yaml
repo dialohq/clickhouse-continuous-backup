@@ -23,6 +23,9 @@
 {{- if and .Values.backup.enabled (not .Values.pauseServer.enabled) }}
 {{- fail "backup.enabled requires pauseServer.enabled: the backup pauses ingestion through the pause server" }}
 {{- end }}
+{{- if and .Values.pauseServer.enabled (empty .Values.pauseServer.keeperAddress) }}
+{{- fail "pauseServer.keeperAddress is required: the pause server keeps its tokens and leader lock in Keeper" }}
+{{- end }}
 {{- range $name := list "clickhouse" "backup" "recovery" "pauseServer" }}
 {{- $config := index $.Values $name }}
 {{- if and (or (ne $name "backup") $.Values.backup.enabled) (or (ne $name "pauseServer") $.Values.pauseServer.enabled) }}

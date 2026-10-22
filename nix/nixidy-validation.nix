@@ -20,7 +20,10 @@
           credentialsSecret.name = "clickhouse-backup-credentials";
         };
         recovery.credentialsSecret.name = "clickhouse-recovery-credentials";
-        pauseServer.credentialsSecret.name = "clickhouse-pause-credentials";
+        pauseServer = {
+          credentialsSecret.name = "clickhouse-pause-credentials";
+          keeperAddress = "keeper.example:9181";
+        };
         pipelines = [
           {
             name = "records";

@@ -74,6 +74,7 @@
             --set-string backup.credentialsSecret.name=clickhouse-backup-credentials
             --set-string recovery.credentialsSecret.name=clickhouse-recovery-credentials
             --set-string pauseServer.credentialsSecret.name=clickhouse-pause-credentials
+            --set-string pauseServer.keeperAddress=keeper.example:9181
             --set backup.maxIncrementalsPerFull=2
             --set backup.maxBandwidthBytesPerSecond=1048576
           )
@@ -112,7 +113,9 @@
           expect_rejected --set pauseServer.pauseTimeoutSeconds=0
           expect_rejected --set pauseServer.port=0
           expect_rejected --set pauseServer.port=65536
-          expect_rejected --set-string pauseServer.persistence.size=
+          expect_rejected --set-string pauseServer.keeperAddress=
+          expect_rejected --set-string pauseServer.keeperAddress=keeper.example:9181/chroot
+          expect_rejected --set pauseServer.replicas=0
           expect_rejected --set timeouts.kafkaTransactionSeconds=0
           expect_rejected --set recovery.replayTopicReplicationFactor=0
           expect_rejected --set recovery.replayTopicRetentionMs=0
@@ -162,11 +165,19 @@
           grep -F 'pause-server.json: |' rendered.yaml >/dev/null
           grep -F '"pauseServerUrl": "http://test-durable-clickhouse-sink-pause-server:8080"' rendered.yaml >/dev/null
           grep -F '"listen": "0.0.0.0:8080"' rendered.yaml >/dev/null
-          grep -F '"pausesFile": "/var/lib/pause-server/pauses.json"' rendered.yaml >/dev/null
+          grep -F '"keeperAddress": "keeper.example:9181"' rendered.yaml >/dev/null
+          grep -F '"keeperPath": "/durable-clickhouse-sink/pause-server/default"' rendered.yaml >/dev/null
           grep -F '"clickhousePropertiesFile": "/etc/clickhouse-pause/clickhouse.properties"' rendered.yaml >/dev/null
           grep -F '"pauseTtlSeconds": 30' rendered.yaml >/dev/null
-          grep -F 'kind: PersistentVolumeClaim' rendered.yaml >/dev/null
-          grep -F 'claimName: test-durable-clickhouse-sink-pause-server' rendered.yaml >/dev/null
+          if grep -F 'kind: PersistentVolumeClaim' rendered.yaml; then
+            echo "pause server unexpectedly claims a volume" >&2
+            exit 1
+          fi
+          grep -F 'durable-clickhouse.dialo.ai/pause-server-role: active' rendered.yaml >/dev/null
+          grep -F 'resources: ["pods"]' rendered.yaml >/dev/null
+          grep -F 'verbs: ["get", "list", "patch"]' rendered.yaml >/dev/null
+          grep -F 'serviceAccountName: test-durable-clickhouse-sink-pause-server' rendered.yaml >/dev/null
+          grep -F 'fieldRef: {fieldPath: metadata.name}' rendered.yaml >/dev/null
           grep -F 'component: pause-server' rendered.yaml >/dev/null
           grep -F '"pause-server", "/etc/durable-clickhouse/pause-server.json"' rendered.yaml >/dev/null
           grep -F 'secretName: clickhouse-pause-credentials' rendered.yaml >/dev/null

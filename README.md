@@ -59,6 +59,7 @@ recovery:
     name: durable-clickhouse-recovery
 
 pauseServer:
+  keeperAddress: clickhouse-keeper.example.internal:9181
   credentialsSecret:
     name: durable-clickhouse-pause-server
 
@@ -112,18 +113,20 @@ backup:
 ```
 
 Backups pause ingestion through the [pause server](docs/pause-server.md),
-deployed by default. It needs its own ClickHouse credentials with `SELECT` on
-the KeeperMap state tables, and a small persistent volume for its tokens:
+deployed by default. Its replicas elect a leader and keep their tokens in
+ClickHouse Keeper, and the leader labels its pod so the Service routes to it.
+It needs its own ClickHouse credentials with `SELECT` on the KeeperMap state
+tables, and the address of a Keeper it can write to:
 
 ```yaml
 pauseServer:
   enabled: true
+  replicas: 2
+  keeperAddress: clickhouse-keeper.example.internal:9181
   ttlSeconds: 30
   credentialsSecret:
     name: durable-clickhouse-pause-server
     propertiesKey: clickhouse.properties
-  persistence:
-    size: 64Mi
 ```
 
 Network, Kafka, polling, hook, and backup deadlines have chart defaults under
