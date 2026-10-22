@@ -125,9 +125,11 @@ recovery:
 # Required when backup.enabled is true.
 pauseServer:
   enabled: true
+  replicas: 2
   podAnnotations: {}
   serviceAccountName: ""
   port: 8080
+  keeperAddress: ""
   # A pause not renewed within this many seconds is resumed; clients renew every ttlSeconds/3.
   ttlSeconds: 30
   # How long the server waits for connectors to pause or resume. The backup's client gives up
@@ -141,10 +143,6 @@ pauseServer:
   credentialsSecret:
     name: ""
     propertiesKey: clickhouse.properties
-  # Holds the tokens file, so pauses survive pod restarts and still expire.
-  persistence:
-    storageClass: ""
-    size: 64Mi
   resources:
     requests:
       cpu: 50m

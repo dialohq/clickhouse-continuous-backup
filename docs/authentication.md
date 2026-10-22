@@ -87,6 +87,12 @@ The pause server uses a separate `pauseServer.credentialsSecret` containing
 the connectors' KeeperMap state tables, so `SELECT` on them is enough. It
 should be distinct from the ingestion writer.
 
+The pause server also connects to Keeper at `pauseServer.keeperAddress` without
+authentication, and creates its nodes open to every Keeper client. Its pods run
+as a ServiceAccount the chart creates, or `pauseServer.serviceAccountName`,
+bound to a Role that can get, list, and patch pods in the release namespace, so
+the leader can label its pod for the Service.
+
 RGW/S3 credentials are not passed through Helm. Configure
 `backup.namedCollection` on every ClickHouse server. The
 collection may use fixed access keys for a test such as MinIO, environment or

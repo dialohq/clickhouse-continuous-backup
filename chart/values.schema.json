@@ -197,12 +197,14 @@
     },
     "pauseServer": {
       "type": "object",
-      "required": ["enabled", "port", "ttlSeconds", "pauseTimeoutSeconds", "credentialsSecret", "persistence"],
+      "required": ["enabled", "replicas", "port", "keeperAddress", "ttlSeconds", "pauseTimeoutSeconds", "credentialsSecret"],
       "properties": {
         "enabled": {"type": "boolean"},
+        "replicas": {"type": "integer", "minimum": 1},
         "podAnnotations": {"type": "object", "additionalProperties": {"type": "string"}},
         "serviceAccountName": {"type": "string"},
         "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "keeperAddress": {"type": "string", "pattern": "^$|^[^\\s/]+$"},
         "ttlSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
         "pauseTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
         "logLevel": {"type": "string"},
@@ -213,14 +215,6 @@
           "properties": {
             "name": {"type": "string"},
             "propertiesKey": {"type": "string", "minLength": 1}
-          }
-        },
-        "persistence": {
-          "type": "object",
-          "required": ["size"],
-          "properties": {
-            "storageClass": {"type": "string"},
-            "size": {"type": "string", "minLength": 1}
           }
         },
         "resources": {"type": "object"}
