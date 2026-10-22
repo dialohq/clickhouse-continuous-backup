@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -14,7 +14,7 @@ use tracing::{Span, debug, error, field, info, instrument, warn};
 use uuid::Uuid;
 
 use super::{
-    AppState,
+    AppState, Term,
     api::{PauseRequest, PauseResponse, RenewRequest, ResumeRequest},
     offsets::read_offsets,
     registry::{Pause, TokenStore},
@@ -28,7 +28,17 @@ pub(super) async fn pause(
     State(state): State<AppState>,
     Json(request): Json<PauseRequest>,
 ) -> Response {
-    let store = state.store.lock().await;
+    let Some(term) = state.current_term() else {
+        return not_leading();
+    };
+    tokio::select! {
+        response = pause_as_leader(&state, &term, request) => response,
+        () = term.ended.cancelled() => lost_leadership(),
+    }
+}
+
+async fn pause_as_leader(state: &AppState, term: &Term, request: PauseRequest) -> Response {
+    let store = term.store.lock().await;
     debug!("acquired the pause lock");
     let snapshot = match store.read().await {
         Ok(snapshot) => snapshot,
@@ -127,7 +137,7 @@ pub(super) async fn pause(
         try_join_all(
             running
                 .iter()
-                .map(|connector| pause_connector(&state, connector)),
+                .map(|connector| pause_connector(state, connector)),
         )
         .await?;
         try_join_all(
@@ -188,7 +198,17 @@ pub(super) async fn resume(
     State(state): State<AppState>,
     Json(request): Json<ResumeRequest>,
 ) -> Response {
-    let store = state.store.lock().await;
+    let Some(term) = state.current_term() else {
+        return not_leading();
+    };
+    tokio::select! {
+        response = resume_as_leader(&state, &term, request) => response,
+        () = term.ended.cancelled() => lost_leadership(),
+    }
+}
+
+async fn resume_as_leader(state: &AppState, term: &Term, request: ResumeRequest) -> Response {
+    let store = term.store.lock().await;
     debug!("acquired the pause lock");
     let snapshot = match store.read().await {
         Ok(snapshot) => snapshot,
@@ -225,7 +245,7 @@ pub(super) async fn resume(
     // The token is only removed once its connectors are running again, so a failed resume can be
     // retried with the same token.
     if let Err(error) =
-        resume_connectors(&state, &snapshot.held_only_by(&request.token, Utc::now())).await
+        resume_connectors(state, &snapshot.held_only_by(&request.token, Utc::now())).await
     {
         return reject(StatusCode::BAD_GATEWAY, format!("{error:#}"));
     }
@@ -241,7 +261,17 @@ pub(super) async fn renew(
     State(state): State<AppState>,
     Json(request): Json<RenewRequest>,
 ) -> Response {
-    let store = state.store.lock().await;
+    let Some(term) = state.current_term() else {
+        return not_leading();
+    };
+    tokio::select! {
+        response = renew_as_leader(&state, &term, request) => response,
+        () = term.ended.cancelled() => lost_leadership(),
+    }
+}
+
+async fn renew_as_leader(state: &AppState, term: &Term, request: RenewRequest) -> Response {
+    let store = term.store.lock().await;
     let snapshot = match store.read().await {
         Ok(snapshot) => snapshot,
         Err(error) => return reject(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
@@ -292,13 +322,13 @@ pub(super) async fn sweep(state: &AppState, store: &TokenStore) -> Result<usize>
     Ok(left)
 }
 
-/// Sweeps every `SWEEP_INTERVAL`; requests leave expired pauses to it.
-pub(super) async fn sweep_periodically(state: AppState) {
+/// Sweeps every `SWEEP_INTERVAL` for as long as the term lasts; requests leave expired pauses to it.
+pub(super) async fn sweep_periodically(state: AppState, term: Arc<Term>) {
     let mut ticks = interval(SWEEP_INTERVAL);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         ticks.tick().await;
-        let store = state.store.lock().await;
+        let store = term.store.lock().await;
         if let Err(error) = sweep(&state, &store).await {
             error!("failed to sweep pauses: {error:#}");
         }
@@ -314,6 +344,16 @@ async fn resume_connectors(state: &AppState, connectors: &[String]) -> Result<()
     )
     .await?;
     Ok(())
+}
+
+fn not_leading() -> Response {
+    warn!("refused a request: this pause server is standing by");
+    (StatusCode::SERVICE_UNAVAILABLE, "not the leader").into_response()
+}
+
+fn lost_leadership() -> Response {
+    warn!("dropped a request: this pause server stopped leading midway");
+    (StatusCode::SERVICE_UNAVAILABLE, "lost leadership midway").into_response()
 }
 
 /// Logs the failure and turns it into the response the client sees.

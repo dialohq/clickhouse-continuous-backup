@@ -7,12 +7,20 @@ use std::{
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, Response, StatusCode};
 use serde::Serialize;
-use tokio::{task::AbortHandle, time::sleep};
+use tokio::{
+    task::AbortHandle,
+    time::{Instant, sleep},
+};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use super::api::{PauseRequest, PauseResponse, RenewRequest, ResumeRequest};
 use crate::config::RuntimeTimeouts;
+
+/// How long to keep retrying while the pause server fails over: a standby takes over once the
+/// leader's Keeper session times out, and the Service follows the leader's label after that.
+const FAILOVER_RETRY: Duration = Duration::from_secs(30);
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Calls the pause server and keeps every token it has not resumed yet renewed.
 pub(crate) struct PauseClient {
@@ -113,12 +121,7 @@ impl Drop for PauseClient {
 async fn renew_periodically(client: Client, base_url: Arc<str>, token: Uuid, every: Duration) {
     loop {
         sleep(every).await;
-        let result = client
-            .post(format!("{base_url}/renew"))
-            .json(&RenewRequest { token })
-            .send()
-            .await;
-        match result {
+        match send(&client, &base_url, "renew", &RenewRequest { token }).await {
             Ok(response) if response.status() == StatusCode::NOT_FOUND => {
                 warn!("pause is gone from the pause server, no longer renewing it");
                 return;
@@ -138,12 +141,7 @@ async fn post(
     path: &str,
     body: &impl Serialize,
 ) -> Result<Response> {
-    let response = client
-        .post(format!("{base_url}/{path}"))
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("pause server /{path} request failed"))?;
+    let response = send(client, base_url, path, body).await?;
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -153,4 +151,33 @@ async fn post(
         "pause server /{path} returned {status}: {}",
         body.trim_end()
     )
+}
+
+/// Sends the request, retrying for `FAILOVER_RETRY` while no pause server leads or can be reached.
+///
+/// Retrying is safe even if a request did something before failing: whatever a lost request
+/// paused is held by a token nobody renews, so it expires.
+async fn send(
+    client: &Client,
+    base_url: &str,
+    path: &str,
+    body: &impl Serialize,
+) -> Result<Response> {
+    let deadline = Instant::now() + FAILOVER_RETRY;
+    loop {
+        let result = client
+            .post(format!("{base_url}/{path}"))
+            .json(body)
+            .send()
+            .await;
+        let retry = match &result {
+            Ok(response) => response.status() == StatusCode::SERVICE_UNAVAILABLE,
+            Err(error) => error.is_connect(),
+        };
+        if !retry || Instant::now() + RETRY_DELAY > deadline {
+            return result.with_context(|| format!("pause server /{path} request failed"));
+        }
+        debug!(path, "no pause server is leading, retrying");
+        sleep(RETRY_DELAY).await;
+    }
 }
