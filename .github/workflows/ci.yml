@@ -10,8 +10,11 @@ permissions:
 
 jobs:
   checks:
-    runs-on: nixos
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: accept-flake-config = true
       - name: Build flake checks
-        run: nix-fast-build --flake .#checks
+        run: nix run --inputs-from . nixpkgs#nix-fast-build -- --flake .#checks --no-nom
